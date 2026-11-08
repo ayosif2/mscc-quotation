@@ -1,0 +1,40 @@
+MSCC Quotation System — authentication update
+==============================================
+
+WHAT CHANGED
+- Every /api route now requires a login token (only /api/login is public).
+- Passwords are stored as salted hashes (your existing passwords keep working;
+  they are converted automatically the first time the server starts).
+- The hardcoded admin1 / password in the website code is gone.
+- Server checks roles: pre-sales only see/edit their own or granted projects,
+  only admins manage users / settings / backups, only the superadmin restores backups.
+- New "Password" button in the top bar so people can change their own password.
+- Passwords must be at least 8 characters (for NEW / reset passwords).
+- 8 wrong logins in 15 minutes from the same place = temporary lockout.
+
+INSTALL (10 minutes)
+1. Close the "MSCC Server" window (and the tunnel window) on the server PC.
+2. COPY THE WHOLE "MSCC" FOLDER somewhere safe (e.g. "MSCC - backup before auth").
+   Do this with the server stopped so the .db / .db-wal files are consistent.
+   This copy is your rollback.
+3. Copy these files from this zip into the live folder, replacing when asked:
+      server.js
+      auth-utils.js        (new)
+      reset-password.js    (new)
+      SRC\app.jsx
+4. Double-click start.bat (it rebuilds the website automatically).
+5. In the live folder, open FIRST_RUN_ADMIN.txt. Sign in with that username and
+   password, click "Password" in the top bar and set your own, then DELETE the file.
+6. Everyone has to sign in again once. Their usernames and passwords are unchanged.
+
+IF YOU FORGET THE SUPERADMIN PASSWORD
+   Open a command prompt in the MSCC folder and run:
+      node reset-password.js admin1 NewPassHere123
+
+ROLLBACK
+   Close the server, delete the live folder, put your backup copy back, run start.bat.
+   (The old version has the security holes, so keep the tunnel closed while on it.)
+
+NOTES
+- Old backup files (.json) still restore fine; their plain-text passwords are hashed on import.
+- New backups contain password HASHES, not passwords. Still keep them private.
