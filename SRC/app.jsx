@@ -746,7 +746,8 @@ const totRows = [
   // Cover letter + T&Cs are each their own fixed .page (1 page each in the common case);
   // the quotation table is measured for real against the actual @page size/margins.
   const contentPages=estimateContentPages(theadRowHTML,itemRows+totRows,hdr+titleBlockHTML);
-  const totalPages=2+contentPages;
+  const showTerms=tpl.includeTerms!==false; // template setting (v1.2.0); older templates have no flag = include
+  const totalPages=(showTerms?2:1)+contentPages; // cover (+ T&C page) + item pages
 
   const infoTable=`<table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:18px;">
     <tr><td style="border:1px solid #ccc;padding:5px 8px;font-weight:600;background:#c0392b;color:#fff;;width:110px;">Project:</td><td style="border:1px solid #ccc;padding:5px 8px;" colspan="3"><strong>${project.projectName}</strong></td></tr>
@@ -773,8 +774,8 @@ const totRows = [
   </style></head><body style="-webkit-print-color-adjust: exact !important; print-color-adjust: exact !important;">
   <div class="page">${hdr}${infoTable}<div style="white-space:pre-wrap;font-size:12px;line-height:1.7;">${coverLetter}</div>
   </div>
-  <div class="page">${hdr}<h3 style="margin-top:0;">Terms &amp; Conditions</h3><div style="white-space:pre-wrap;font-size:12px;line-height:1.8;">${tpl.termsAndConditions||""}</div>
-  </div>
+  ${showTerms?`<div class="page">${hdr}<h3 style="margin-top:0;">Terms &amp; Conditions</h3><div style="white-space:pre-wrap;font-size:12px;line-height:1.8;">${tpl.termsAndConditions||""}</div>
+  </div>`:""}
   <div class="page">${hdr}${titleBlockHTML}
   <table style="width:100%;font-size:12px;border-collapse:collapse;">
     <thead>${theadRowHTML}</thead>
@@ -1055,7 +1056,8 @@ function exportDetailedCSV(project,rev){
 function generatePartNumPDF(project, rev, settings, tplId) {
   rev={...(rev.data||{}),...rev};
   const curr=rev.currency||"USD",rnd=rev.roundUp,rate=rev.conversionRate||1;
-  const tpl=settings.templates.find(t=>t.id===tplId)||settings.templates[0];
+  // no template picker for this export → use the default template (previously always the first one)
+  const tpl=settings.templates.find(t=>t.id===tplId)||settings.templates.find(t=>t.id===settings.defaultTemplateId)||settings.templates[0];
   const co=settings.company;
   const lUD=line=>applyRounding(calcUnitPrice(line,rev.brandFactors,rev.localFactor),rnd,rate);
   const lT=line=>line.optional?0:lUD(line)*line.qty;
@@ -1264,7 +1266,8 @@ const totRows = [
   const theadRowHTML=`<tr style="background:#c0392b;color:#fff;"><th style="border:1px solid #aaa;padding:7px 8px;text-align:center;width:5%">#</th><th style="border:1px solid #aaa;padding:7px 8px;width:13%">Model No</th><th style="border:1px solid #aaa;padding:7px 8px;width:11%">Brand</th><th style="border:1px solid #aaa;padding:7px 8px;">Description</th><th style="border:1px solid #aaa;padding:7px 8px;text-align:center;width:8%">Qty</th><th style="border:1px solid #aaa;padding:7px 8px;text-align:right;width:12%">Unit Price</th><th style="border:1px solid #aaa;padding:7px 8px;text-align:right;width:12%">Total</th></tr>`;
   const titleBlockHTML=`<h3 style="margin-top:0;">Quotation — ${project.projectName}</h3>`;
   const contentPages=estimateContentPages(theadRowHTML,itemRows+totRows,hdr+titleBlockHTML);
-  const totalPages=2+contentPages;
+  const showTerms=tpl.includeTerms!==false; // template setting (v1.2.0); older templates have no flag = include
+  const totalPages=(showTerms?2:1)+contentPages; // cover (+ T&C page) + item pages
 
   const infoTable=`<table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:18px;">
   <tr><td style="border:1px solid #ccc;padding:5px 8px;font-weight:600;background:#c0392b;color:#fff;;width:110px;">Project:</td><td style="border:1px solid #ccc;padding:5px 8px;" colspan="3"><strong>${project.projectName}</strong></td></tr>
@@ -1291,8 +1294,8 @@ const totRows = [
   </style></head><body style="-webkit-print-color-adjust: exact !important; print-color-adjust: exact !important;">
   <div class="page">${hdr}${infoTable}<div style="white-space:pre-wrap;font-size:12px;line-height:1.7;">${coverLetter}</div>
   </div>
-  <div class="page">${hdr}<h3 style="margin-top:0;">Terms &amp; Conditions</h3><div style="white-space:pre-wrap;font-size:12px;line-height:1.8;">${tpl.termsAndConditions||""}</div>
-  </div>
+  ${showTerms?`<div class="page">${hdr}<h3 style="margin-top:0;">Terms &amp; Conditions</h3><div style="white-space:pre-wrap;font-size:12px;line-height:1.8;">${tpl.termsAndConditions||""}</div>
+  </div>`:""}
   <div class="page">${hdr}${titleBlockHTML}
   <table style="width:100%;font-size:12px;border-collapse:collapse;">
     <thead>${theadRowHTML}</thead>
@@ -2125,7 +2128,15 @@ function SettingsTab({onSaved}){
   {sub==="company"&&<div style={{maxWidth:500}}>{[["name","Company name"],["address","Address"],["poBox","P.O. Box"],["city","City/ZIP"],["phone","Phone"],["mobile","Mobile"],["email","Email"]].map(([f,l])=><div key={f} style={{marginBottom:9}}><label style={C.label}>{l}</label><input style={C.input} value={S.company[f]||""} onChange={e=>set(`company.${f}`,e.target.value)}/></div>)}</div>}
   {sub==="factors"&&<div style={{maxWidth:460}}><p style={C.sT}>Default local factor</p><div style={{marginBottom:9}}><label style={C.label}>Local factor</label><input style={{...C.input,maxWidth:170}} type="number" step="0.01" value={S.defaultLocalFactor} onChange={e=>updL(e.target.value)}/></div>{warnL&&<div style={{background:"#fff7ed",border:"1px solid #fed7aa",borderRadius:"6px",padding:10,marginBottom:10}}><p style={{margin:"0 0 7px",color:"#ea580c",fontSize:13}}>⚠️ Changing global local factor. Confirm?</p><div style={{display:"flex",gap:8}}><button style={C.btnS} onClick={()=>{set("defaultLocalFactor",pendL);setWarnL(false);}}>Confirm</button><button style={C.btnS} onClick={()=>setWarnL(false)}>Cancel</button></div></div>}<p style={C.sT}>Brand factors <button style={{...C.btnS,fontSize:11,padding:"2px 7px",marginLeft:7}} onClick={syncBrands}>Sync from price list</button></p>{Object.keys(S.defaultBrandFactors).length===0&&<p style={{fontSize:13,color:"#888"}}>Import price list first, then sync.</p>}{Object.entries(S.defaultBrandFactors).map(([b,f])=><div key={b} style={{...C.row,marginBottom:7,alignItems:"center"}}><span style={{minWidth:110,fontSize:13,fontWeight:500}}>{b}</span><input style={{...C.input,maxWidth:120}} type="number" step="0.01" min="0" value={f} onChange={e=>{const s=JSON.parse(JSON.stringify(S));s.defaultBrandFactors[b]=parseFloat(e.target.value)||0;persist(s);}}/></div>)}</div>}
   {sub==="currency"&&<div style={{maxWidth:300}}><p style={C.sT}>Default currency</p><select style={C.input} value={S.defaultCurrency} onChange={e=>set("defaultCurrency",e.target.value)}>{["USD","EGP","EUR","GBP","SAR","AED"].map(c=><option key={c}>{c}</option>)}</select></div>}
-  {sub==="templates"&&<div><div style={{...C.row,alignItems:"center",marginBottom:10}}><select style={{...C.input,maxWidth:230}} value={tIdx} onChange={e=>setTIdx(Number(e.target.value))}>{S.templates.map((t,i)=><option key={t.id} value={i}>{t.name}{t.id===S.defaultTemplateId?" (default)":""}</option>)}</select><button style={C.btnS} onClick={()=>set("defaultTemplateId",S.templates[tIdx].id)}>Set default</button>{S.templates.length>1&&<button style={C.btnD} onClick={()=>{const s=JSON.parse(JSON.stringify(S));s.templates.splice(tIdx,1);setTIdx(0);persist(s);}}>Delete</button>}</div><div style={{...C.row,marginBottom:10}}><div style={C.f1}><label style={C.label}>Clone as</label><input style={C.input} value={newTpl} onChange={e=>setNewTpl(e.target.value)} placeholder="New template name"/></div><button style={{...C.btnS,alignSelf:"flex-end"}} onClick={()=>{if(!newTpl.trim())return;const s=JSON.parse(JSON.stringify(S));s.templates.push({id:`tpl_${Date.now()}`,name:newTpl.trim(),coverLetter:s.templates[tIdx].coverLetter,termsAndConditions:s.templates[tIdx].termsAndConditions});setTIdx(s.templates.length-1);setNewTpl("");persist(s);}}>Clone</button></div><div style={{marginBottom:9}}><label style={C.label}>Cover letter</label><textarea style={{...C.input,minHeight:160,resize:"vertical",lineHeight:1.6}} value={S.templates[tIdx].coverLetter} onChange={e=>{const s=JSON.parse(JSON.stringify(S));s.templates[tIdx].coverLetter=e.target.value;persist(s);}}/></div><div><label style={C.label}>Terms & conditions</label><textarea style={{...C.input,minHeight:230,resize:"vertical",lineHeight:1.6}} value={S.templates[tIdx].termsAndConditions} onChange={e=>{const s=JSON.parse(JSON.stringify(S));s.templates[tIdx].termsAndConditions=e.target.value;persist(s);}}/></div></div>}
+  {sub==="templates"&&<div><div style={{...C.row,alignItems:"center",marginBottom:10}}><select style={{...C.input,maxWidth:230}} value={tIdx} onChange={e=>setTIdx(Number(e.target.value))}>{S.templates.map((t,i)=><option key={t.id} value={i}>{t.name}{t.id===S.defaultTemplateId?" (default)":""}</option>)}</select><button style={C.btnS} onClick={()=>set("defaultTemplateId",S.templates[tIdx].id)}>Set default</button>{S.templates.length>1&&<button style={C.btnD} onClick={()=>{const s=JSON.parse(JSON.stringify(S));s.templates.splice(tIdx,1);setTIdx(0);persist(s);}}>Delete</button>}</div><div style={{...C.row,marginBottom:10}}><div style={C.f1}><label style={C.label}>Clone as</label><input style={C.input} value={newTpl} onChange={e=>setNewTpl(e.target.value)} placeholder="New template name"/></div><button style={{...C.btnS,alignSelf:"flex-end"}} onClick={()=>{if(!newTpl.trim())return;const s=JSON.parse(JSON.stringify(S));s.templates.push({id:`tpl_${Date.now()}`,name:newTpl.trim(),coverLetter:s.templates[tIdx].coverLetter,termsAndConditions:s.templates[tIdx].termsAndConditions,includeTerms:s.templates[tIdx].includeTerms!==false});setTIdx(s.templates.length-1);setNewTpl("");persist(s);}}>Clone</button></div><div style={{marginBottom:9}}><label style={C.label}>Cover letter</label><textarea style={{...C.input,minHeight:160,resize:"vertical",lineHeight:1.6}} value={S.templates[tIdx].coverLetter} onChange={e=>{const s=JSON.parse(JSON.stringify(S));s.templates[tIdx].coverLetter=e.target.value;persist(s);}}/></div><div>
+    <label style={{display:"flex",alignItems:"center",gap:7,fontSize:13,fontWeight:500,cursor:"pointer",marginBottom:6}}>
+      <input type="checkbox" checked={S.templates[tIdx].includeTerms!==false} onChange={e=>{const s=JSON.parse(JSON.stringify(S));s.templates[tIdx].includeTerms=e.target.checked;persist(s);}}/>
+      Include the Terms &amp; Conditions page
+      <span style={{fontSize:11,color:"#888",fontWeight:400}}>— in the Quotation and Quotation with P/N PDFs that use this template</span>
+    </label>
+    <label style={C.label}>Terms & conditions{S.templates[tIdx].includeTerms===false&&<span style={{color:"#ea580c"}}> — not printed (box above is unticked); the text is kept</span>}</label>
+    <textarea style={{...C.input,minHeight:230,resize:"vertical",lineHeight:1.6,opacity:S.templates[tIdx].includeTerms===false?0.55:1}} value={S.templates[tIdx].termsAndConditions} onChange={e=>{const s=JSON.parse(JSON.stringify(S));s.templates[tIdx].termsAndConditions=e.target.value;persist(s);}}/>
+  </div></div>}
   </div>);
 }
 
