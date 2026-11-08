@@ -33,14 +33,19 @@ function useConnStatus(){
 // badge and the save/submit feedback are always based on the same source of truth —
 // there's no separate "ping" that can go stale by the time the real save happens.
 const authHeaders = () => { const t = LS.get("mscc_session")?.token; return t ? { Authorization:`Bearer ${t}` } : {}; };
+// Edit lock (v1.1.0): the open project editor sets this to its own random id. It is sent
+// with every request so the server only accepts draft saves / submits from the window
+// that holds the project's lock. Only one editor is open per browser tab at a time.
+let currentEditLock = null;
+const lockHeaders = () => currentEditLock ? { "X-Edit-Lock": currentEditLock } : {};
 function forceLogout(){ LS.set("mscc_session",null); window.location.reload(); }
 async function apiCall(path, opts={}) {
   if (!API) return { ok:true, data:null, noServer:true };
   try {
-    const r = await fetch(`${API}${path}`, { ...opts, headers:{"Content-Type":"application/json", ...authHeaders(), ...(opts.headers||{})} });
+    const r = await fetch(`${API}${path}`, { ...opts, headers:{"Content-Type":"application/json", ...authHeaders(), ...lockHeaders(), ...(opts.headers||{})} });
     setConnStatus("online"); // reached the server at all, even if it returned an error status
     if (r.status===401) { forceLogout(); return { ok:false, data:null, status:401 }; } // session expired / password changed / account disabled
-    if (!r.ok) return { ok:false, data:null, status:r.status };
+    if (!r.ok) { let data=null; try{ data = await r.json(); }catch{} return { ok:false, data, status:r.status }; }
     let data=null; try{ data = await r.json(); }catch{ data=null; }
     return { ok:true, data };
   } catch (e) {
@@ -62,6 +67,8 @@ const now = () => new Date().toISOString();
 // ─── Constants ────────────────────────────────────────────────────────────────
 const LOGO_URL = "https://static.wixstatic.com/media/0b6472_98229db8a906487eb945955cdb276022~mv2.png/v1/fill/w_259,h_125,al_c,q_85,usm_0.66_1.00_0.01,enc_avif,quality_auto/0b6472_98229db8a906487eb945955cdb276022~mv2.png";
 const SITE_URL = "https://www.mscc-eg.com/";
+// Injected at build time from package.json by vite.config.js (bump it with release.ps1).
+const APP_VERSION = typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "dev";
 // Bundled Excel output template. Place the .xlsx file at this path under /public
 // (served as a static asset — works the same under `npm run dev` and under
 // start.bat's built dist served by server.js, since it's just a GET of a static file).
@@ -98,11 +105,17 @@ async function addPriceItem(item) { if(API){const r=await apiCall("/pricelist",{
 async function deletePriceItem(id) { if(API){const r=await apiCall(`/pricelist/${id}`,{method:"DELETE"});return{ok:r.ok};} const cur=LS.get("mscc_pricelist")||[]; LS.set("mscc_pricelist",cur.filter(x=>x.id!==id)); return{ok:true}; }
 async function loadProjects() { if(API){const r=await apiFetch("/projects");if(r)return r;} return LS.get("mscc_projects")||[]; }
 async function createProject(p) { if(API){const r=await apiCall("/projects",{method:"POST",body:JSON.stringify(p)});if(!r.ok)return{ok:false};return{ok:true,id:r.data?.id||p.id};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",[p,...cur]); return{ok:true,id:p.id}; }
-async function updateProject(p) { if(API){const r=await apiCall(`/projects/${p.id}`,{method:"PUT",body:JSON.stringify(p)});return{ok:r.ok};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",cur.map(x=>x.id===p.id?{...x,...p}:x)); return{ok:true}; }
+async function updateProject(p) { if(API){const r=await apiCall(`/projects/${p.id}`,{method:"PUT",body:JSON.stringify(p)});return{ok:r.ok,lockLost:r.status===409,lock:r.data?.lock};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",cur.map(x=>x.id===p.id?{...x,...p}:x)); return{ok:true}; }
 async function deleteProject(id) { if(API){const r=await apiCall(`/projects/${id}`,{method:"DELETE"});return{ok:r.ok};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",cur.filter(x=>x.id!==id)); return{ok:true}; }
-async function submitRevision(projectId,rev) { if(API){const r=await apiCall(`/projects/${projectId}/revisions`,{method:"POST",body:JSON.stringify(rev)});return{ok:r.ok};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",cur.map(p=>p.id!==projectId?p:{...p,status:"submitted",revisions:[...(p.revisions||[]),rev],draft:null})); return{ok:true}; }
-async function saveDraft(projectId,data,savedBy) { if(API){const r=await apiCall(`/projects/${projectId}/draft`,{method:"POST",body:JSON.stringify({data,savedBy})});return{ok:r.ok};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",cur.map(p=>p.id===projectId?{...p,draft:{...data,_savedBy:savedBy,_savedAt:now()}}:p)); return{ok:true}; }
+async function submitRevision(projectId,rev) { if(API){const r=await apiCall(`/projects/${projectId}/revisions`,{method:"POST",body:JSON.stringify(rev)});return{ok:r.ok,lockLost:r.status===409,lock:r.data?.lock};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",cur.map(p=>p.id!==projectId?p:{...p,status:"submitted",revisions:[...(p.revisions||[]),rev],draft:null})); return{ok:true}; }
+async function saveDraft(projectId,data,savedBy) { if(API){const r=await apiCall(`/projects/${projectId}/draft`,{method:"POST",body:JSON.stringify({data,savedBy})});return{ok:r.ok,lockLost:r.status===409,lock:r.data?.lock};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",cur.map(p=>p.id===projectId?{...p,draft:{...data,_savedBy:savedBy,_savedAt:now()}}:p)); return{ok:true}; }
 async function clearDraft(projectId) { if(API){const r=await apiCall(`/projects/${projectId}/draft`,{method:"DELETE"});return{ok:r.ok};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",cur.map(p=>p.id===projectId?{...p,draft:null}:p)); return{ok:true}; }
+// Edit locks. Without a server (local demo mode) there is nobody to share with, so the lock always succeeds.
+async function acquireLock(projectId,lockId,takeover) { if(!API)return{ok:true}; const r=await apiCall(`/projects/${projectId}/lock`,{method:"POST",body:JSON.stringify({lockId,takeover:!!takeover})}); return{ok:r.ok,locked:r.status===409,lock:r.data?.lock,offline:!r.ok&&!r.status}; }
+function releaseLock(projectId,lockId) { if(!API||!projectId)return Promise.resolve(); try{ return fetch(`${API}/projects/${projectId}/unlock`,{method:"POST",keepalive:true,headers:{"Content-Type":"application/json",...authHeaders()},body:JSON.stringify({lockId})}).catch(()=>{}); }catch{ return Promise.resolve(); } }
+// Projects-list helpers for the draft / lock owner (server sends savedBy/savedAt; the local demo mode stored _savedBy/_savedAt).
+const draftOwner = d => d ? (d.savedBy||d._savedBy||"") : "";
+const draftTime  = d => d && (d.savedAt||d._savedAt) ? new Date(d.savedAt||d._savedAt).toLocaleString() : "";
 async function grantAccess(projectId,username) { if(API){const r=await apiCall(`/projects/${projectId}/grant`,{method:"POST",body:JSON.stringify({username})});return{ok:r.ok};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",cur.map(p=>p.id===projectId?{...p,grantedTo:[...new Set([...(p.grantedTo||[]),username])]}:p)); return{ok:true}; }
 async function revokeAccess(projectId,username) { if(API){const r=await apiCall(`/projects/${projectId}/revoke`,{method:"POST",body:JSON.stringify({username})});return{ok:r.ok};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",cur.map(p=>p.id===projectId?{...p,grantedTo:(p.grantedTo||[]).filter(u=>u!==username)}:p)); return{ok:true}; }
 
@@ -165,7 +178,45 @@ function toCSV(items){
   return lines.join("\n");
 }
 
-function calcUnitPrice(item,brandFactors,localFactor){return(item.glp*(brandFactors[item.brand]??1))+(item.local*localFactor);}
+// ─── Factors (v1.1.0) ─────────────────────────────────────────────────────────
+// By default an item uses the project's brand factor and local factor (the
+// original formula). When the "Custom factor" button was pressed on that item
+// (customFactor:true) it uses its own itemBrandFactor / itemLocalFactor instead.
+// An empty or invalid custom value falls back to the project factor.
+const fNum=(v,fb)=>{const n=parseFloat(v);return isNaN(n)?fb:n;};
+function itemFactors(item,brandFactors,localFactor){
+  const bf=(brandFactors||{})[item.brand]??1, lf=localFactor??1;
+  if(!item.customFactor)return{bf,lf,custom:false};
+  return{bf:fNum(item.itemBrandFactor,bf),lf:fNum(item.itemLocalFactor,lf),custom:true};
+}
+function calcUnitPrice(item,brandFactors,localFactor){const f=itemFactors(item,brandFactors,localFactor);return((item.glp||0)*f.bf)+((item.local||0)*f.lf);}
+// Turn custom factors on for one item, pre-filled with the factors it uses right now.
+const withCustomFactor=(item,brandFactors,localFactor)=>{const f=itemFactors(item,brandFactors,localFactor);return{...item,customFactor:true,itemBrandFactor:f.bf,itemLocalFactor:f.lf};};
+// Turn them off again: the item goes back to the project's factors.
+const withoutCustomFactor=item=>{const{customFactor,itemBrandFactor,itemLocalFactor,...rest}=item;return rest;};
+const fmtFactor=n=>String(+(+n||0).toFixed(3));
+// Effective (total) factor per brand, from the reverse calculation
+//   Σ(GLP × qty × factor) = GLP_total × Factor_total  ⇒  Factor_total = Σ(GLP × qty × factor) ÷ GLP_total
+// and the same for Local. Optional items are left out; subsystem children count × the subsystem qty.
+// Amounts are in USD before currency conversion / rounding.
+function factorSummary(lines,brandFactors,localFactor){
+  const brands={};const local={raw:0,factored:0,custom:false};
+  const add=(it,qty)=>{
+    const f=itemFactors(it,brandFactors,localFactor);const b=it.brand||"Other";
+    if(!brands[b])brands[b]={glp:0,factored:0,custom:false,base:(brandFactors||{})[it.brand]??1};
+    brands[b].glp+=(it.glp||0)*qty;brands[b].factored+=(it.glp||0)*qty*f.bf;
+    local.raw+=(it.local||0)*qty;local.factored+=(it.local||0)*qty*f.lf;
+    if(f.custom){brands[b].custom=true;if(it.local)local.custom=true;}
+  };
+  (lines||[]).forEach(l=>{
+    if(l.type==="section"||l.optional)return;
+    if(l.type==="subsystem"){(l.children||[]).filter(c=>!c.optional).forEach(c=>add(c,(c.qty||1)*(l.qty||1)));return;}
+    add(l,l.qty||1);
+  });
+  Object.values(brands).forEach(v=>{v.factor=v.glp>0?v.factored/v.glp:v.base;});
+  local.factor=local.raw>0?local.factored/local.raw:(localFactor??1);
+  return{brands,local};
+}
 // Assign per-section sequential row numbers; section header rows get rowNum=""
 function assignRowNums(lines){
   // Strip mergeGroup from lines whose group partner is no longer adjacent
@@ -180,7 +231,7 @@ function assignRowNums(lines){
   let n=0;
   return cleaned.map((l,i)=>{
     if(l.type==="section")return{...l,rowNum:"",rowNumAuto:""};
-    if(l.mergeGroup){const prev=cleaned[i-1];if(prev&&prev.mergeGroup===l.mergeGroup)return{...l,rowNum:"",rowNumAuto:""};}
+    if(l.mergeGroup){const prev=cleaned[i-1];if(prev&&prev.mergeGroup===l.mergeGroup)return{...l,rowNum:"",rowNumAuto:"",rowNumOverride:null};} // merged rows share the first row's number
     n++;
     const auto=String(n);
     return{...l,rowNumAuto:auto,rowNum:l.rowNumOverride||auto};
@@ -336,6 +387,13 @@ function subsystemSubtableHTML(ss,ssQty,colSpan,showPrice,brandFactors,localFact
     </table>
   </td></tr>`;
 }
+// Detailed Quotation: the factors a line was priced with, shown under its price.
+// Custom per-item factors are blue with ★; project factors are grey.
+function factorNoteHTML(item,brandFactors,localFactor){
+  const f=itemFactors(item,brandFactors,localFactor);
+  return`<div style="font-size:9px;font-weight:400;color:${f.custom?"#1d4ed8":"#999"};white-space:nowrap;">×${fmtFactor(f.bf)}${item.local?` · L×${fmtFactor(f.lf)}`:""}${f.custom?" ★":""}</div>`;
+}
+const factorNoteText=(item,brandFactors,localFactor)=>{const f=itemFactors(item,brandFactors,localFactor);return`×${fmtFactor(f.bf)}${item.local?` / L×${fmtFactor(f.lf)}`:""}${f.custom?" (custom)":""}`;};
 function subsystemSubtableHTML2(ss,ssQty,colSpan,showPrice,brandFactors,localFactor,rnd,fmtN,lUD,lT){
   const rows=(ss.children||[]).map((c,i)=>{
     const dispQty=showPrice?c.qty:c.qty*ssQty;
@@ -349,7 +407,7 @@ function subsystemSubtableHTML2(ss,ssQty,colSpan,showPrice,brandFactors,localFac
       <td style="border:1px solid #e0e0e0;padding:4px 8px;font-size:11px;">${c.glp||""}</td>
       <td style="border:1px solid #e0e0e0;padding:4px 8px;font-size:11px;">${c.local||""}</td>
       <td style="border:1px solid #e0e0e0;padding:4px 8px;text-align:center;font-size:11px;">${c.optional?"Opt.":dispQty}</td>
-      <td style="border:1px solid #e0e0e0;padding:4px 8px;font-size:11px;">${fmtN(lUD(c)*(c.optional?"Opt.":dispQty),rnd)||""}</td>
+      <td style="border:1px solid #e0e0e0;padding:4px 8px;font-size:11px;">${fmtN(lUD(c)*(c.optional?"Opt.":dispQty),rnd)||""}${factorNoteHTML(c,brandFactors,localFactor)}</td>
 
     </tr>`;
   }).join("");
@@ -888,7 +946,7 @@ function generateDetailedPDF(project, rev, settings, tplId){
         }
       }
       const numCell=isSubEntry?"":`<td colspan="2" style="border:1px solid #ddd;padding:5px 8px;text-align:center;vertical-align:middle;" rowspan="${rs}">${l.rowNum}</td>`;
-      rows.push(`<tr>${numCell}<td style="border:1px solid #ddd;padding:5px 8px;font-family:monospace;font-size:11px;white-space:pre-wrap;">${l.modelNo||""}</td><td style="border:1px solid #ddd;padding:5px 8px;">${l.brand||""}</td><td colspan="3"style="border:1px solid #ddd;padding:5px 8px;white-space:pre-wrap;">${l.description||""}</td><td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(l.glp,false)}</td><td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(l.local||0,false)}</td><td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(lFact(l),rnd)}</td><td style="border:1px solid #ddd;padding:5px 8px;text-align:center;">${l.optional?"opt.":l.qty}</td><td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${l.optional?"optional":fmtN(lTot(l),rnd)}</td></tr>`);}return rows.join("");
+      rows.push(`<tr>${numCell}<td style="border:1px solid #ddd;padding:5px 8px;font-family:monospace;font-size:11px;white-space:pre-wrap;">${l.modelNo||""}</td><td style="border:1px solid #ddd;padding:5px 8px;">${l.brand||""}</td><td colspan="3"style="border:1px solid #ddd;padding:5px 8px;white-space:pre-wrap;">${l.description||""}</td><td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(l.glp,false)}</td><td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(l.local||0,false)}</td><td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(lFact(l),rnd)}${factorNoteHTML(l,rev.brandFactors,rev.localFactor)}</td><td style="border:1px solid #ddd;padding:5px 8px;text-align:center;">${l.optional?"opt.":l.qty}</td><td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${l.optional?"optional":fmtN(lTot(l),rnd)}</td></tr>`);}return rows.join("");
     })();
 
   const totRows=[
@@ -899,37 +957,29 @@ function generateDetailedPDF(project, rev, settings, tplId){
     `<tr style="background:#fdf0f0;"><td colspan="11" style="border:1px solid #ddd;padding:8px 10px;text-align:right;font-weight:700;font-size:14px;color:#c0392b;">Grand Total (${curr})</td><td style="border:1px solid #ddd;padding:8px 10px;text-align:right;font-weight:700;font-size:14px;color:#c0392b;">${curr==="USD"?"$":curr} ${fmtN(grandTotal,rnd)}</td></tr>`,
     ...(rev.gtAfterDiscountEnabled&&rev.gtAfterDiscount?[`<tr><td colspan="11" style="border:1px solid #ddd;padding:7px 10px;text-align:right;">Grand Total after discount</td><td style="border:1px solid #ddd;padding:7px 10px;text-align:right;">${rev.gtAfterDiscount}</td></tr>`]:[]),
   ].join("");
-  // brand summary — GLP brands + Local as separate entry
-  const brandMap={};
-  (rev.lines||[]).forEach(l=>{if(l.type==="section")return;
-    if(l.type==="subsystem"){if(l.optional)return;(l.children||[]).filter(c=>!c.optional).forEach(c=>{const b=c.brand||"Other";if(!brandMap[b])brandMap[b]={glp:0,factored:0,factor:rev.brandFactors?.[b]??1};const cU=applyRounding(calcUnitPrice(c,rev.brandFactors,rev.localFactor),rnd,rate);brandMap[b].glp+=c.glp*c.qty*(l.qty||1);brandMap[b].factored+=cU*c.qty*(l.qty||1);});return;}
-    if(l.optional)return;const b=l.brand||"Other";if(!brandMap[b])brandMap[b]={glp:0,factored:0,factor:rev.brandFactors?.[b]??1};brandMap[b].glp+=l.glp*l.qty;brandMap[b].factored+=lTot(l);
-  });
-  const totalSum = Object.entries(brandMap).reduce((sum, [b, v]) => {
-    return sum + (v.glp * v.factor);
-}, 0);
-// console.log("Raw sum:", totalSum);
-
-  const totalLocal=(()=>{let t=0;(rev.lines||[]).forEach(l=>{if(l.type==="section")return;if(l.type==="subsystem"){if(!l.optional)(l.children||[]).forEach(c=>t+=(c.local||0)*c.qty*(l.qty||1));}else{if(!l.optional)t+=(l.local||0)*l.qty;}});return t;})();
-  const totalLocalFactored=applyRounding(totalLocal*(rev.localFactor??1),rnd,rate);
-  const formattedTotal = fmtN(totalSum+totalLocal * (rev.localFactor ?? 1), rnd);
-// console.log("\n sum:", formattedTotal);
+  // Brand summary — GLP brands + Local as a separate entry. Factor = effective factor from
+  // Σ(GLP × qty × factor) = GLP_total × Factor_total (includes custom item factors, marked ★).
+  // "After Factor" is in the quotation currency, rounded like the rest of the quotation.
+  const fs=factorSummary(rev.lines,rev.brandFactors,rev.localFactor);
+  const brandMap=fs.brands;
+  const totalLocal=fs.local.raw;
+  const totalLocalFactored=applyRounding(fs.local.factored,rnd,rate);
+  const star=on=>on?` <span style="color:#1d4ed8;">★</span>`:"";
   const brandRows=Object.entries(brandMap).map(([b,v])=>`<tr>
     <td style="border:1px solid #ddd;padding:5px 8px;">${b}</td>
     <td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(v.glp,false)}</td>
-    <td style="border:1px solid #ddd;padding:5px 8px;text-align:center;">×${v.factor.toFixed(2)}</td>
-    <td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(v.glp*v.factor,rnd)}</td>
-    <!--<td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(v.factored,rnd)}</td>-->
+    <td style="border:1px solid #ddd;padding:5px 8px;text-align:center;">×${fmtFactor(v.factor)}${star(v.custom)}</td>
+    <td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(applyRounding(v.factored,rnd,rate),rnd)}</td>
   </tr>`).join("");
   const localRow=totalLocal>0?`<tr style="background:#f0f7ff;">
     <td style="border:1px solid #ddd;padding:5px 8px;font-style:italic;">Local</td>
     <td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(totalLocal,false)}</td>
-    <td style="border:1px solid #ddd;padding:5px 8px;text-align:center;">×${(rev.localFactor??1).toFixed(2)}</td>
-    <td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(totalLocal * (rev.localFactor ?? 1), rnd)}</td>
-    <!--<td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(totalLocalFactored,rnd)}</td>-->
+    <td style="border:1px solid #ddd;padding:5px 8px;text-align:center;">×${fmtFactor(fs.local.factor)}${star(fs.local.custom)}</td>
+    <td style="border:1px solid #ddd;padding:5px 8px;text-align:right;">${fmtN(totalLocalFactored,rnd)}</td>
   </tr>`:"";
   const tGLP=Object.values(brandMap).reduce((s,v)=>s+v.glp,0);
-  const tFact=Object.values(brandMap).reduce((s,v)=>s+v.factored,0)+totalLocalFactored;
+  const tFact=Object.values(brandMap).reduce((s,v)=>s+applyRounding(v.factored,rnd,rate),0)+totalLocalFactored;
+  const anyCustom=Object.values(brandMap).some(v=>v.custom)||fs.local.custom;
   openWin(`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Detailed — ${project.projectName}</title><style>
     body{font-family:Arial,sans-serif;font-size:11px;color:#222;margin:0;padding:28px 28px 60px;}
     .footer{position:fixed;bottom:0;left:0;right:0;border-top:1px solid #e0e0e0;padding:5px 28px;font-size:10px;color:#888;display:flex;justify-content:space-between;background:#fff;}
@@ -958,18 +1008,17 @@ function generateDetailedPDF(project, rev, settings, tplId){
       <th style="border:1px solid #aaa;padding:6px 8px;">Brand / Source</th>
       <th style="border:1px solid #aaa;padding:6px 8px;text-align:right;">Total (USD)</th>
       <th style="border:1px solid #aaa;padding:6px 8px;text-align:center;">Factor</th>
-      <th style="border:1px solid #aaa;padding:6px 8px;text-align:right;">After Factor</th>
-      <!--<th style="border:1px solid #aaa;padding:6px 8px;text-align:right;">After Factor (approximated)</th>-->
+      <th style="border:1px solid #aaa;padding:6px 8px;text-align:right;">After Factor (${curr})</th>
     </tr></thead>
     <tbody>${brandRows}${localRow}</tbody>
     <tfoot><tr style="background:#f0f0f0;font-weight:700;">
       <td style="border:1px solid #ddd;padding:6px 8px;">TOTAL</td>
       <td style="border:1px solid #ddd;padding:6px 8px;text-align:right;">${fmtN(tGLP+totalLocal,false)}</td>
       <td style="border:1px solid #ddd;padding:6px 8px;"></td>
-      <td style="border:1px solid #ddd;padding:6px 8px;">${formattedTotal}</td>
-      <!--<td style="border:1px solid #ddd;padding:6px 8px;text-align:right;">${fmtN(tFact,rnd)}</td>-->
+      <td style="border:1px solid #ddd;padding:6px 8px;text-align:right;">${fmtN(tFact,rnd)}</td>
     </tr></tfoot>
   </table>
+  <p style="font-size:10px;color:#888;margin:6px 0 0;">Factor per brand = Σ(GLP × qty × factor) ÷ Σ(GLP × qty).${anyCustom?` <span style="color:#1d4ed8;">★</span> = includes items with a custom factor (shown in blue under their price).`:""}</p>
   <div class="footer"><span>${co.name} | ${co.address} | Tel: ${co.phone} | ${co.email}</span><span>Detailed Quotation — Internal Use Only</span></div>
   ${printBtn}</body></html>`);
 }
@@ -979,20 +1028,23 @@ function exportDetailedCSV(project,rev){
   const rnd=rev.roundUp,rate=rev.conversionRate||1;
   const lFact=line=>applyRounding(calcUnitPrice(line,rev.brandFactors,rev.localFactor),rnd,rate);
   const lTot=line=>lFact(line)*line.qty;
-  const brandMap={};
-  (rev.lines||[]).filter(l=>l.type!=="section").forEach(l=>{if(l.type==="subsystem"){if(l.optional)return;(l.children||[]).filter(c=>!c.optional).forEach(c=>{const b=c.brand||"Other";if(!brandMap[b])brandMap[b]={glp:0,factored:0,factor:rev.brandFactors?.[b]??1};const cU=applyRounding(calcUnitPrice(c,rev.brandFactors,rev.localFactor),rnd,rate);brandMap[b].glp+=c.glp*c.qty*(l.qty||1);brandMap[b].factored+=cU*c.qty*(l.qty||1);});return;}if(l.optional)return;const b=l.brand||"Other";if(!brandMap[b])brandMap[b]={glp:0,factored:0,factor:rev.brandFactors?.[b]??1};brandMap[b].glp+=l.glp*l.qty;brandMap[b].factored+=lTot(l);});
-  const totalLocal=(()=>{let t=0;(rev.lines||[]).forEach(l=>{if(l.type==="section")return;if(l.type==="subsystem"){if(!l.optional)(l.children||[]).forEach(c=>t+=(c.local||0)*c.qty*(l.qty||1));}else{if(!l.optional)t+=(l.local||0)*l.qty;}});return t;})();
-  const totalLocalFactored=applyRounding(totalLocal*(rev.localFactor??1),rnd,rate);
-  const tFact=Object.values(brandMap).reduce((s,v)=>s+v.factored,0)+totalLocalFactored;
+  // Brand summary uses the effective factor per brand: Σ(GLP × qty × factor) ÷ Σ(GLP × qty).
+  const fs=factorSummary(rev.lines,rev.brandFactors,rev.localFactor);
+  const brandMap=fs.brands;
+  const totalLocal=fs.local.raw;
+  const totalLocalFactored=applyRounding(fs.local.factored,rnd,rate);
+  const tFact=Object.values(brandMap).reduce((s,v)=>s+applyRounding(v.factored,rnd,rate),0)+totalLocalFactored;
+  const fN=x=>factorNoteText(x,rev.brandFactors,rev.localFactor);
   const rows=[
     [`Detailed Quotation — ${project.projectName}`],[`INTERNAL USE ONLY`],[`Code: ${rev.code}`],[`Date: ${rev.date||""}`],[],
-    ["#","Model No","Brand","Description","GLP Unit","Local Unit","Unit Price","Qty","Total"],
-    ...(() => { const ls=rev.lines||[]; const out=[]; for(let i=0;i<ls.length;i++){const l=ls[i]; if(l.type==="section"){out.push([l.label||"Section","","","","","","","",""]);continue;} if(l.type==="subsystem"){const ssU=applyRounding(ssUnitPrice(l,rev.brandFactors,rev.localFactor),rnd,rate);const ssT=ssU*(l.qty||1);out.push([l.rowNum,"","",l.description+(l.optional?" (Subsystem, Optional)":" (Subsystem)"),"","","",l.optional?"Optional":(l.qty||1),l.optional?"—":fmtN(ssT,rnd)]);(l.children||[]).forEach((c,ci)=>{const cU=applyRounding(calcUnitPrice(c,rev.brandFactors,rev.localFactor),rnd,rate);out.push(["  └"+(ci+1),c.modelNo||"",c.brand||"",c.description||"",fmtN(c.glp,false),fmtN(c.local||0,false),fmtN(cU,rnd),c.qty,fmtN(cU*c.qty,rnd)]);});continue;} const grp=l.mergeGroup;const isSubEntry=grp&&ls[i-1]?.mergeGroup===grp;out.push([isSubEntry?"":l.rowNum,l.modelNo||"",l.brand||"",l.description||"",fmtN(l.glp,false),fmtN(l.local||0,false),fmtN(lFact(l),rnd),l.qty,fmtN(lTot(l),rnd)]);} return out; })(),
+    ["#","Model No","Brand","Description","GLP Unit","Local Unit","Factor","Unit Price","Qty","Total"],
+    ...(() => { const ls=rev.lines||[]; const out=[]; for(let i=0;i<ls.length;i++){const l=ls[i]; if(l.type==="section"){out.push([l.label||"Section","","","","","","","","",""]);continue;} if(l.type==="subsystem"){const ssU=applyRounding(ssUnitPrice(l,rev.brandFactors,rev.localFactor),rnd,rate);const ssT=ssU*(l.qty||1);out.push([l.rowNum,"","",l.description+(l.optional?" (Subsystem, Optional)":" (Subsystem)"),"","","","",l.optional?"Optional":(l.qty||1),l.optional?"—":fmtN(ssT,rnd)]);(l.children||[]).forEach((c,ci)=>{const cU=applyRounding(calcUnitPrice(c,rev.brandFactors,rev.localFactor),rnd,rate);out.push(["  └"+(ci+1),c.modelNo||"",c.brand||"",c.description||"",fmtN(c.glp,false),fmtN(c.local||0,false),fN(c),fmtN(cU,rnd),c.qty,fmtN(cU*c.qty,rnd)]);});continue;} const grp=l.mergeGroup;const isSubEntry=grp&&ls[i-1]?.mergeGroup===grp;out.push([isSubEntry?"":l.rowNum,l.modelNo||"",l.brand||"",l.description||"",fmtN(l.glp,false),fmtN(l.local||0,false),fN(l),fmtN(lFact(l),rnd),l.qty,fmtN(lTot(l),rnd)]);} return out; })(),
     [],[`Brand Summary`],
     ["Brand / Source","Total (USD)","Factor","After Factor"],
-    ...Object.entries(brandMap).map(([b,v])=>[b,fmtN(v.glp,false),`×${v.factor.toFixed(2)}`,fmtN(v.factored,rnd)]),
-    ...(totalLocal>0?[["Local",fmtN(totalLocal,false),`×${(rev.localFactor??1).toFixed(2)}`,fmtN(totalLocalFactored,rnd)]]:[]),
+    ...Object.entries(brandMap).map(([b,v])=>[b,fmtN(v.glp,false),`×${fmtFactor(v.factor)}${v.custom?" (incl. custom)":""}`,fmtN(applyRounding(v.factored,rnd,rate),rnd)]),
+    ...(totalLocal>0?[["Local",fmtN(totalLocal,false),`×${fmtFactor(fs.local.factor)}${fs.local.custom?" (incl. custom)":""}`,fmtN(totalLocalFactored,rnd)]]:[]),
     ["TOTAL",fmtN(Object.values(brandMap).reduce((s,v)=>s+v.glp,0)+totalLocal,false),"",fmtN(tFact,rnd)],
+    [],["Factor per brand = Σ(GLP × qty × factor) ÷ Σ(GLP × qty)"],
   ];
   const csv=rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
   const blob=new Blob([csv],{type:"text/csv"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`DetailedQuotation_${rev.code}.csv`;a.click();
@@ -1560,6 +1612,9 @@ async function generateExcelExport(project, rev, settings) {
         optUnit: l.optional ? ssChildUnitTotal(l, rev.brandFactors, rev.localFactor) : null,
         brandTotals,
         localTotal: l.optional ? null : localTotal,
+        // custom per-item factors can't be expressed by the template's one-factor-per-brand
+        // formula, so such rows get their unit value written as a fixed number instead
+        fixedUnit: !l.optional && (l.children || []).some(c => !c.optional && c.customFactor) ? ssChildUnitTotal(l, rev.brandFactors, rev.localFactor) : null,
         mergeGroup: l.mergeGroup || null
       });
       continue;
@@ -1576,6 +1631,7 @@ async function generateExcelExport(project, rev, settings) {
       optUnit: l.optional ? calcUnitPrice(l, rev.brandFactors, rev.localFactor) : null,
       glp: l.optional ? null : l.glp,
       local: l.optional ? null : l.local,
+      fixedUnit: !l.optional && l.customFactor ? calcUnitPrice(l, rev.brandFactors, rev.localFactor) : null,
       mergeGroup: grp || null
     });
   }
@@ -1641,7 +1697,12 @@ async function generateExcelExport(project, rev, settings) {
     }
 
     // I = per-unit GLP total
-    ws.getCell(`I${r}`).value = { formula: XLSX_I_FORMULA };
+    // (rows with a custom per-item factor get a fixed value — the GLP grid still shows true list prices)
+    if (item.fixedUnit != null) {
+      ws.getCell(`I${r}`).value = Math.round(item.fixedUnit * 100) / 100; // (no cell note: notes add VML parts that clash with the header-image re-injection below)
+    } else {
+      ws.getCell(`I${r}`).value = { formula: XLSX_I_FORMULA };
+    }
     ws.getCell(`I${r}`).numFmt = currencyFmt;
 
     // F = rounded (or not) version of I
@@ -1988,7 +2049,7 @@ function Login({onLogin}){
       LS.set("mscc_session",sess);onLogin(sess);
     }catch{setLoading(false);setErr("Could not reach the server.");}
   };
-  return(<div style={C.center}><div style={{...C.card,width:330}}><div style={{textAlign:"center",marginBottom:18}}><a href={SITE_URL} target="_blank" rel="noreferrer"><img src={LOGO_URL} alt="MSCC" style={{height:52,objectFit:"contain"}} onError={e=>e.target.style.display="none"}/></a><p style={{margin:"8px 0 0",color:"#666",fontSize:13}}>Quotation Management System</p></div><div style={{marginBottom:9}}><label style={C.label}>Username</label><input style={C.input} value={u} onChange={e=>setU(e.target.value)} onKeyDown={e=>e.key==="Enter"&&go()}/></div><div style={{marginBottom:9}}><label style={C.label}>Password</label><input style={C.input} type="password" value={p} onChange={e=>setP(e.target.value)} onKeyDown={e=>e.key==="Enter"&&go()}/></div>{err&&<p style={C.err}>{err}</p>}<button style={{...C.btnP,width:"100%",marginTop:10,padding:"9px"}} onClick={go} disabled={loading}>{loading?"Signing in…":"Sign In"}</button></div></div>);
+  return(<div style={C.center}><div style={{...C.card,width:330}}><div style={{textAlign:"center",marginBottom:18}}><a href={SITE_URL} target="_blank" rel="noreferrer"><img src={LOGO_URL} alt="MSCC" style={{height:52,objectFit:"contain"}} onError={e=>e.target.style.display="none"}/></a><p style={{margin:"8px 0 0",color:"#666",fontSize:13}}>Quotation Management System</p></div><div style={{marginBottom:9}}><label style={C.label}>Username</label><input style={C.input} value={u} onChange={e=>setU(e.target.value)} onKeyDown={e=>e.key==="Enter"&&go()}/></div><div style={{marginBottom:9}}><label style={C.label}>Password</label><input style={C.input} type="password" value={p} onChange={e=>setP(e.target.value)} onKeyDown={e=>e.key==="Enter"&&go()}/></div>{err&&<p style={C.err}>{err}</p>}<button style={{...C.btnP,width:"100%",marginTop:10,padding:"9px"}} onClick={go} disabled={loading}>{loading?"Signing in…":"Sign In"}</button><p style={{margin:"12px 0 0",textAlign:"center",fontSize:11,color:"#aaa"}}>v{APP_VERSION}</p></div></div>);
 }
 
 // Polls the server periodically so the badge reflects reachability even when the
@@ -2018,7 +2079,7 @@ function ConnStatusBadge(){
 
 function TopBar({user,tab,tabs,setTab,onLogout}){
   const [pwOpen,setPwOpen]=useState(false);
-  return(<div style={{background:"#fff",borderBottom:"1px solid #ccc",padding:"0 18px",display:"flex",alignItems:"center",justifyContent:"space-between",height:50,position:"sticky",top:0,zIndex:100}}><a href={SITE_URL} target="_blank" rel="noreferrer"><img src={LOGO_URL} alt="MSCC" style={{height:32,objectFit:"contain"}} onError={e=>e.target.style.display="none"}/></a><div style={{display:"flex",overflowX:"auto"}}>{tabs.map(t=><button key={t} style={C.tab(tab===t)} onClick={()=>setTab(t)}>{t}</button>)}</div><div style={{display:"flex",alignItems:"center",gap:12}}><ConnStatusBadge/><span style={{fontSize:12,color:"#666",whiteSpace:"nowrap"}}>{user.displayName||user.username} <span style={C.badge(isAdmin(user)?"orange":"blue")}>{user.role}</span></span><button style={C.btnS} onClick={()=>setPwOpen(true)}>Password</button><button style={C.btnS} onClick={onLogout}>Sign out</button></div>{pwOpen&&<ChangePasswordModal onClose={()=>setPwOpen(false)}/>}</div>);
+  return(<div style={{background:"#fff",borderBottom:"1px solid #ccc",padding:"0 18px",display:"flex",alignItems:"center",justifyContent:"space-between",height:50,position:"sticky",top:0,zIndex:100}}><a href={SITE_URL} target="_blank" rel="noreferrer"><span style={{display:"flex",alignItems:"center",gap:6}}><img src={LOGO_URL} alt="MSCC" style={{height:32,objectFit:"contain"}} onError={e=>e.target.style.display="none"}/><span style={{fontSize:10,color:"#999"}} title="App version">v{APP_VERSION}</span></span></a><div style={{display:"flex",overflowX:"auto"}}>{tabs.map(t=><button key={t} style={C.tab(tab===t)} onClick={()=>setTab(t)}>{t}</button>)}</div><div style={{display:"flex",alignItems:"center",gap:12}}><ConnStatusBadge/><span style={{fontSize:12,color:"#666",whiteSpace:"nowrap"}}>{user.displayName||user.username} <span style={C.badge(isAdmin(user)?"orange":"blue")}>{user.role}</span></span><button style={C.btnS} onClick={()=>setPwOpen(true)}>Password</button><button style={C.btnS} onClick={onLogout}>Sign out</button></div>{pwOpen&&<ChangePasswordModal onClose={()=>setPwOpen(false)}/>}</div>);
 }
 
 function ChangePasswordModal({onClose}){
@@ -2417,7 +2478,20 @@ function ItemSearchDropdown({priceList,onSelect,excludeSubsystems}){
 
 // ─── Project Editor ───────────────────────────────────────────────────────────
 // ─── SubsystemRow component (needs own state so can't be inside .map) ─────────
-function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,curr,
+// Per-item factor inputs, shown under the unit price once "Custom factor" was pressed on that item.
+// The placeholder shows the project factor the item would use without the custom value.
+function FactorInputs({item,brandFactors,localFactor,onChange}){
+  const base=itemFactors({...item,customFactor:false},brandFactors,localFactor);
+  const inp={width:56,padding:"1px 4px",fontSize:11,textAlign:"right",border:"1px solid #93c5fd",borderRadius:3,background:"#fff"};
+  const lbl={fontSize:10,color:"#1d4ed8",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:3};
+  return(<div style={{display:"flex",flexDirection:"column",gap:2,alignItems:"flex-end",marginTop:4}} onClick={e=>e.stopPropagation()} onMouseDown={e=>e.stopPropagation()}>
+    <label style={lbl} title={`Brand factor for this item only (project ${item.brand||"brand"} factor: ×${fmtFactor(base.bf)})`}>Brand ×<input style={inp} type="number" step="0.01" min="0" value={item.itemBrandFactor??""} placeholder={fmtFactor(base.bf)} onChange={e=>onChange("itemBrandFactor",e.target.value)}/></label>
+    <label style={lbl} title={`Local factor for this item only (project local factor: ×${fmtFactor(base.lf)})`}>Local ×<input style={inp} type="number" step="0.01" min="0" value={item.itemLocalFactor??""} placeholder={fmtFactor(base.lf)} onChange={e=>onChange("itemLocalFactor",e.target.value)}/></label>
+  </div>);
+}
+const factorBtn={padding:"2px 4px",fontSize:10,whiteSpace:"nowrap",color:"#1d4ed8",borderColor:"#93c5fd"};
+
+function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,curr,setSSCustomFactors,updChildFactor,resetRowNum,
   updSS,delSS,dupLine,toggleSSCollapse,addChildFromCatalog,addChildCustom,updChild,delChild,dragChildOut,reorderChildren,
   onDragStart,onDragEnter,onDragEnd,onDragOver,ssChildDragItem,ssChildDragOver,dragOver,
   priceList,plBrands,fmtN,fmtR,C,ssLineUnitDisp,ssLineTot,calcUnitPrice,applyRounding,
@@ -2450,7 +2524,7 @@ function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,curr,
                 onBlur={e=>{setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(null);}}
                 onKeyDown={e=>{if(e.key==="Enter"){setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(null);}if(e.key==="Escape")setEditingRowNum(null);}}
               />
-              {line.rowNumOverride&&<div style={{fontSize:9,color:"#c0392b",cursor:"pointer",marginTop:1}} onClick={()=>{setRowNumOverride(line.id,"");setEditingRowNum(null);}}>↺ auto</div>}
+              {line.rowNumOverride&&<div style={{fontSize:9,color:"#c0392b",cursor:"pointer",marginTop:1}} onMouseDown={e=>{e.preventDefault();resetRowNum(line.id);}}>↺ auto</div>}
             </div>
           : <div style={{marginTop:2,cursor:"text"}} onClick={e=>{e.stopPropagation();setEditingRowNum(line.id);}}>
               <span style={{fontSize:12,fontWeight:600,color:line.rowNumOverride?"#c0392b":"#555",borderBottom:line.rowNumOverride?"1px dashed #c0392b":"1px dashed transparent",padding:"0 2px"}}>{line.rowNum}</span>
@@ -2494,6 +2568,9 @@ function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,curr,
           {canMerge&&<button style={{...C.btnS,padding:"2px 4px",fontSize:10,whiteSpace:"nowrap",color:"#c0392b",borderColor:"#c0392b"}} onClick={()=>mergeWithAbove(line.id)} title="Merge with row above">⤴ Merge</button>}
           {canUnmerge&&isLastInGroup&&<button style={{...C.btnS,padding:"2px 4px",fontSize:10,whiteSpace:"nowrap"}} onClick={()=>unmerge(line.id)} title="Unmerge this row">⊠ Unmerge</button>}
           {(line.children||[]).length>0&&<button style={{...C.btnS,padding:"2px 4px",fontSize:10,whiteSpace:"nowrap"}} onClick={()=>saveSubsystemToPriceList(line)} title="Save this subsystem as a reusable template">💾 Save tmpl</button>}
+          {line.customFactors
+            ?<button style={{...C.btnS,...factorBtn,background:"#eff6ff"}} onClick={()=>setSSCustomFactors(line.id,false)} title="Cancel the custom factors — every item in this subsystem goes back to the project's brand and local factors">✕ Factors</button>
+            :<button style={{...C.btnS,...factorBtn}} onClick={()=>{setSSCustomFactors(line.id,true);if(line.mergeGroup?!line.forceShowChildren:line.collapsed){if(line.mergeGroup)updSS(line.id,"forceShowChildren",true);else toggleSSCollapse(line.id);}}} title="Give each item in this subsystem its own brand and local factor">ƒ Factors</button>}
           <label style={{display:"flex",alignItems:"center",gap:3,fontSize:11,cursor:"pointer",whiteSpace:"nowrap"}}>
             <input type="checkbox" checked={!!line.optional} onChange={e=>updSS(line.id,"optional",e.target.checked)}/>
             Opt.
@@ -2521,7 +2598,7 @@ function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,curr,
             dragChildOut(from.ssId,child.id,dragOver.current??idx+1);
           }
         }}
-        style={{background:child.optional?"#fffbf0":"#faf5ff",borderLeft:"4px solid #c4b5fd"}}>
+        style={{background:child.optional?"#fffbf0":child.customFactor?"#eff6ff":"#faf5ff",borderLeft:"4px solid #c4b5fd"}}>
         {editingChildId===child.id?(
           <td colSpan={11} style={{padding:"10px 12px",background:"#fffde7",border:"2px solid #f59e0b"}}>
             <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}>
@@ -2547,7 +2624,9 @@ function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,curr,
         <td style={{...C.td,fontSize:11,color:"#ea580c"}}>{child.notes||""}</td>
         <td style={{...C.td,textAlign:"right",color:"#555"}}>{fmtN(child.glp,false)}</td>
         <td style={{...C.td,textAlign:"right",color:"#555"}}>{fmtN(child.local||0,false)}</td>
-        <td style={{...C.td,textAlign:"right"}}>{applyRounding(calcUnitPrice(child,brandFactors,localFactor),roundUp,rate).toFixed(2)}</td>
+        <td style={{...C.td,textAlign:"right"}}>{applyRounding(calcUnitPrice(child,brandFactors,localFactor),roundUp,rate).toFixed(2)}
+          {child.customFactor&&<FactorInputs item={child} brandFactors={brandFactors} localFactor={localFactor} onChange={(f,v)=>updChildFactor(line.id,child.id,f,v)}/>}
+        </td>
         <td style={{...C.td,textAlign:"center"}}>
           {child.optional
             ?<span style={{fontSize:12,color:"#888",fontStyle:"italic"}}>Optional</span>
@@ -2596,14 +2675,18 @@ function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,curr,
   </Fragment>);
 }
 
-function ProjectEditor({project,user,settings,priceList,onBack}){
+function ProjectEditor({project,user,settings,priceList,onBack,takeover,onReopen}){
   const isNew=!project;
   const isSharedProject=!!project&&(project.grantedTo||[]).length>0;
   const latestRev=project?(project.draft||(project.revisions?.length?project.revisions[project.revisions.length-1]:null)):null;
   const lr={...(latestRev?.data||{}),...(latestRev||{})};
 
   const [fields,setFields]=useState({projectName:project?.projectName||"",client:project?.client||"",engineerName:(!isAdmin(user)&&!isSharedProject)?(user.displayName||user.username):(isSharedProject?(lr.engineerName||project?.engineerName||""):(project?.engineerName||"")),salesEngineer:lr.salesEngineer||"",contactName:lr.contactName||"",contactPhone:lr.contactPhone||"",contactEmail:lr.contactEmail||"",refNumber:project?.refNumber||"",systemType:project?.systemType||"",date:lr.date||new Date().toISOString().slice(0,10),currency:lr.currency||settings.defaultCurrency,conversionRate:lr.conversionRate||1});
-  const [brandFactors,setBF]=useState(()=>JSON.parse(JSON.stringify(lr.brandFactors||settings.defaultBrandFactors)));
+  const [brandFactors,setBF]=useState(()=>{ // includes any brand used by the loaded lines, so opening a project is not itself a change
+    const bf=JSON.parse(JSON.stringify(lr.brandFactors||settings.defaultBrandFactors||{}));
+    (lr.lines||[]).forEach(l=>{if(l.brand&&!(l.brand in bf))bf[l.brand]=settings.defaultBrandFactors?.[l.brand]??1;});
+    return bf;
+  });
   const [localFactor,setLF]=useState(lr.localFactor??settings.defaultLocalFactor);
   const [lines,setLines]=useState(()=>lr.lines?JSON.parse(JSON.stringify(lr.lines)):[]);
   const [selectedIds,setSelectedIds]=useState(()=>new Set());
@@ -2629,6 +2712,41 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
   const [autoSaveStatus,setASS]=useState("");
   const projectIdRef=useRef(project?.id||null);
   const autoSaveTimer=useRef(null);
+
+  // ── Edit lock (v1.1.0) ───────────────────────────────────────────────────
+  // Only one editor window at a time may change a project. This window gets a
+  // random lock id, asks the server for the lock on open, refreshes it every
+  // 30 s, and releases it on Back / Submit / closing the tab. If someone else
+  // holds it, the editor opens read-only. If the lock is lost while editing
+  // (admin took over or discarded the draft), it switches to read-only too.
+  const lockIdRef=useRef(null); if(!lockIdRef.current)lockIdRef.current=uid()+uid();
+  const [lockState,setLockState]=useState(isNew?"mine":"checking"); // checking | mine | other | lost | offline
+  const [lockInfo,setLockInfo]=useState(null);
+  const lockStateRef=useRef(lockState); lockStateRef.current=lockState;
+  const readOnly=lockState!=="mine";
+  const loseLock=info=>{clearTimeout(autoSaveTimer.current);setLockInfo(info||null);setLockState("lost");};
+  // Back / after Submit: release the lock first, so the project list that reloads next no longer shows it.
+  const goBack=async()=>{
+    if(lockStateRef.current==="mine"&&projectIdRef.current){lockStateRef.current="released";await releaseLock(projectIdRef.current,lockIdRef.current);}
+    onBack();
+  };
+  useEffect(()=>{
+    currentEditLock=lockIdRef.current;
+    let alive=true;
+    const beat=async first=>{
+      const pid=projectIdRef.current; if(!pid)return; // a new project gets its lock when it is first saved
+      const r=await acquireLock(pid,lockIdRef.current,first&&takeover);
+      if(!alive)return;
+      if(r.ok){setLockState("mine");return;}
+      if(r.locked){if(first){setLockInfo(r.lock);setLockState("other");}else loseLock(r.lock);return;}
+      if(first)setLockState("offline");
+    };
+    beat(true);
+    const iv=setInterval(()=>{if(lockStateRef.current==="mine")beat(false);},30000);
+    const release=()=>{if(lockStateRef.current==="mine")releaseLock(projectIdRef.current,lockIdRef.current);};
+    window.addEventListener("pagehide",release);
+    return()=>{alive=false;clearInterval(iv);window.removeEventListener("pagehide",release);release();if(currentEditLock===lockIdRef.current)currentEditLock=null;};
+  },[]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Undo / Redo ──────────────────────────────────────────────────────────
   // Snapshots every editable piece of state (everything that feeds buildRevData,
@@ -2698,6 +2816,7 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
   const plBrands=[...new Set((priceList||[]).map(i=>i.brand).filter(Boolean))];
 
   const supplyUSD=expandForCalc(lines).reduce((s,l)=>s+calcUnitPrice(l,brandFactors,localFactor)*l.qty,0);
+  const factorSum=factorSummary(lines,brandFactors,localFactor); // effective factor per brand (reverse calculation)
   useEffect(()=>{
     const missing=allBrands.filter(b=>!(b in brandFactors));
     if(missing.length>0){setBF(bf=>{const u={...bf};missing.forEach(b=>{u[b]=settings.defaultBrandFactors[b]??1;});return u;});}
@@ -2737,16 +2856,24 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
     clearTimeout(autoSaveTimer.current);
     autoSaveTimer.current=setTimeout(async()=>{
       if(!fields.projectName.trim())return;
+      if(lockStateRef.current!=="mine")return;
       setASS("Saving…");
       let pid=projectIdRef.current;
       if(!pid){const np={id:uid(),projectName:fields.projectName,client:fields.client,engineerName:fields.engineerName,refNumber:fields.refNumber,systemType:fields.systemType,ownedBy:isAdmin(user)?null:user.username,grantedTo:[],status:"draft",createdAt:now()};const cr=await createProject(np);if(!cr.ok){setASS("⚠ Autosave failed — no connection to server");return;}pid=cr.id;projectIdRef.current=pid;}
       const sr=await saveDraft(pid,buildRevData(),user.username||user.displayName);
+      if(sr.lockLost){setASS("");loseLock(sr.lock);return;}
       if(!sr.ok){setASS("⚠ Autosave failed — no connection to server");return;}
       setASS("Draft saved ✓");setTimeout(()=>setASS(""),2500);
     },1500);
   },[fields,buildRevData,user]);
 
-  useEffect(()=>{triggerAutoSave();},[fields,brandFactors,localFactor,lines,tcEnabled,tcMode,tcValue,tcPercent,tcApprox,installEnabled,installValue,extras,notes,gtAfterDiscount,gtAfterDiscountEnabled,roundUp]);
+  // Autosave only after a real change — merely opening (or viewing) a project saves nothing.
+  const autoSaveArmed=useRef(false);
+  useEffect(()=>{
+    if(!autoSaveArmed.current){autoSaveArmed.current=true;return;}
+    if(lockStateRef.current!=="mine")return;
+    triggerAutoSave();
+  },[fields,brandFactors,localFactor,lines,tcEnabled,tcMode,tcValue,tcPercent,tcApprox,installEnabled,installValue,extras,notes,gtAfterDiscount,gtAfterDiscountEnabled,roundUp]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const addFromCatalog=item=>{
     if(item.type==="subsystem"){
@@ -2882,6 +3009,7 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
   const onDragEnd=()=>{
     const from=dragItem.current,to=dragOver.current;
     dragItem.current=null;dragOver.current=null;
+    if(lockStateRef.current!=="mine")return; // read-only
     if(from===null||to===null||from===to)return;
     setLines(prev=>{
       const fromLine=prev[from];
@@ -2914,6 +3042,20 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
     });
   };
   const updLine=(id,field,val)=>setLines(l=>l.map(x=>x.id===id?{...x,[field]:field==="qty"?(parseInt(val)||1):val}:x));
+
+  // ── Custom per-item factors (v1.1.0) ───────────────────────────────────────
+  // The button on a row affects only that row. On a subsystem it opens a brand
+  // and local factor for each of that subsystem's own items. Cancelling removes
+  // the custom values, so the item(s) use the project's factors again.
+  const setCustomFactor=(id,on)=>setLines(l=>l.map(x=>x.id!==id?x:(on?withCustomFactor(x,brandFactors,localFactor):withoutCustomFactor(x))));
+  const setSSCustomFactors=(ssId,on)=>setLines(l=>l.map(x=>{
+    if(x.id!==ssId)return x;
+    const children=(x.children||[]).map(c=>on?withCustomFactor(c,brandFactors,localFactor):withoutCustomFactor(c));
+    if(on)return{...x,customFactors:true,children};
+    const{customFactors,...rest}=x;return{...rest,children};
+  }));
+  // Factor edits leave the subsystem's (possibly hand-edited) part number alone.
+  const updChildFactor=(ssId,childId,field,val)=>setLines(l=>l.map(x=>x.id!==ssId?x:{...x,children:x.children.map(c=>c.id===childId?{...c,[field]:val}:c)}));
 
   // ── Subsystem helpers ───────────────────────────────────────────────────────
   const addSubsystem=()=>setLines(l=>assignRowNums([...l,{id:uid(),type:"subsystem",description:"New Subsystem",brand:"",partNumber:"",qty:1,children:[],collapsed:false,rowNum:""}]));  const updSS=(ssId,field,val)=>setLines(l=>l.map(x=>x.id===ssId?{...x,[field]:val}:x));
@@ -2964,7 +3106,8 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
   const addChildFromCatalog=(ssId,item)=>{
     setLines(l=>l.map(x=>{
       if(x.id!==ssId)return x;
-      const child={id:uid(),description:item.description,modelNo:item.modelNo,brand:item.brand,glp:item.glp,local:item.local,notes:item.notes||"",qty:1,isCustom:false,optional:false};
+      let child={id:uid(),description:item.description,modelNo:item.modelNo,brand:item.brand,glp:item.glp,local:item.local,notes:item.notes||"",qty:1,isCustom:false,optional:false};
+      if(x.customFactors)child=withCustomFactor(child,brandFactors,localFactor); // subsystem has its factors open
       const children=[...x.children,child];
       return{...x,children,partNumber:autoPartNumber({...x,children})};
     }));
@@ -2973,7 +3116,7 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
     const child={id:uid(),description:form.description,modelNo:form.modelNo,brand:normalizeBrand(form.brand,plBrands),glp:parseFloat(form.glp)||0,local:parseFloat(form.local)||0,notes:form.notes||"",qty:1,isCustom:true,optional:false};
     setLines(l=>l.map(x=>{
       if(x.id!==ssId)return x;
-      const children=[...x.children,child];
+      const children=[...x.children,x.customFactors?withCustomFactor(child,brandFactors,localFactor):child];
       return{...x,children,partNumber:autoPartNumber({...x,children})};
     }));
   };
@@ -2988,7 +3131,7 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
     return{...x,children,partNumber:autoPartNumber({...x,children})};
   }));
   // drag child out of subsystem to flat list at a given flat-list index
-  const dragChildOut=(ssId,childId,toFlatIdx)=>setLines(prev=>{
+  const dragChildOut=(ssId,childId,toFlatIdx)=>lockStateRef.current==="mine"&&setLines(prev=>{
     let child=null;
     const next=prev.map(x=>{
       if(x.id!==ssId)return x;
@@ -3001,7 +3144,7 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
     next.splice(insertAt,0,flatItem);
     return assignRowNums(next);
   });
-  const reorderChildren=(ssId,fromCi,toCi)=>setLines(prev=>prev.map(x=>{
+  const reorderChildren=(ssId,fromCi,toCi)=>lockStateRef.current==="mine"&&setLines(prev=>prev.map(x=>{
     if(x.id!==ssId)return x;
     const ch=[...x.children];
     const[m]=ch.splice(fromCi,1);
@@ -3016,7 +3159,16 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
   const [validationModal,setValidationModal]=useState("");  // "" = hidden, else message string
   const [editingLineId,setEditingLineId]=useState(null);
   const [editingRowNum,setEditingRowNum]=useState(null); // id of line whose rowNum is being edited
-  const setRowNumOverride=(id,val)=>setLines(l=>assignRowNums(l.map(x=>x.id===id?{...x,rowNumOverride:val||null}:x)));
+  // Manual row numbers. An empty box, or the number the row would get automatically,
+  // means "no manual number" — so it keeps renumbering when rows move.
+  // "↺ auto" fires on mouse-down (before the box loses focus) and sets rowNumResetRef,
+  // so the box's own blur can't save the old manual number back right after the reset.
+  const rowNumResetRef=useRef(null);
+  const setRowNumOverride=(id,val)=>{
+    if(rowNumResetRef.current===id){rowNumResetRef.current=null;return;}
+    setLines(l=>assignRowNums(l.map(x=>{if(x.id!==id)return x;const v=String(val??"").trim();return{...x,rowNumOverride:v&&v!==String(x.rowNumAuto)?v:null};})));
+  };
+  const resetRowNum=id=>{rowNumResetRef.current=id;setLines(l=>assignRowNums(l.map(x=>x.id===id?{...x,rowNumOverride:null}:x)));setEditingRowNum(null);setTimeout(()=>{if(rowNumResetRef.current===id)rowNumResetRef.current=null;},0);};
 
   const validate=()=>{
     if(!fields.projectName.trim()){setValidationModal("Please add a project name before continuing.");return false;}
@@ -3028,7 +3180,7 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
   const [savingDraft,setSavingDraft]=useState(false);
 
   const handleSubmit=async()=>{
-    if(!validate()||submitting)return;
+    if(readOnly||!validate()||submitting)return;
     clearTimeout(autoSaveTimer.current); // cancel any pending debounced autosave — it could otherwise
     setSubmitting(true);                 // race with this submit (duplicate project, or a stale draft
     try{                                 // resurrected right after submitRevision clears it).
@@ -3040,17 +3192,19 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
         pid=cr.id;projectIdRef.current=pid;
       }else{
         const ur=await updateProject({id:pid,projectName:fields.projectName,client:fields.client,engineerName:fields.engineerName,refNumber:fields.refNumber,systemType:fields.systemType,ownedBy:project?.ownedBy||(isAdmin(user)?null:user.username),grantedTo:project?.grantedTo||[]});
+        if(ur.lockLost){loseLock(ur.lock);flash("Not submitted — you no longer hold the edit lock for this project.","err");return;}
         if(!ur.ok){flash("Could not reach the server — nothing was submitted. Check your connection and try again.","err");return;}
       }
       const sr=await submitRevision(pid,rev);
+      if(sr.lockLost){loseLock(sr.lock);flash("Not submitted — you no longer hold the edit lock for this project.","err");return;}
       if(!sr.ok){flash("Could not reach the server — revision was not submitted. Check your connection and try again.","err");return;}
       flash(`Submitted as Rev-${project?.revisions?.length||0}.`);
-      setTimeout(()=>onBack(),800);
+      setTimeout(()=>goBack(),800);
     } finally { setSubmitting(false); }
   };
 
   const handleSaveDraft=async()=>{
-    if(!validate()||savingDraft)return;
+    if(readOnly||!validate()||savingDraft)return;
     clearTimeout(autoSaveTimer.current); // cancel any pending debounced autosave — same race as handleSubmit
     setSavingDraft(true);setASS("Saving…");
     try{
@@ -3062,9 +3216,11 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
         pid=cr.id;projectIdRef.current=pid;
       }else{
         const ur=await updateProject({id:pid,projectName:fields.projectName,client:fields.client,engineerName:fields.engineerName,refNumber:fields.refNumber,systemType:fields.systemType,ownedBy:project?.ownedBy||(isAdmin(user)?null:user.username),grantedTo:project?.grantedTo||[]});
+        if(ur.lockLost){setASS("");loseLock(ur.lock);flash("Not saved — you no longer hold the edit lock for this project.","err");return;}
         if(!ur.ok){setASS("");flash("Could not reach the server — draft was not saved. Check your connection and try again.","err");return;}
       }
       const sr=await saveDraft(pid,buildRevData(),user.username||user.displayName);
+      if(sr.lockLost){setASS("");loseLock(sr.lock);flash("Not saved — you no longer hold the edit lock for this project.","err");return;}
       if(!sr.ok){setASS("");flash("Could not reach the server — draft was not saved. Check your connection and try again.","err");return;}
       setASS("Draft saved ✓");setTimeout(()=>setASS(""),2500);
       flash("Draft saved successfully.");
@@ -3073,13 +3229,35 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
 
   return(<div>
     <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,flexWrap:"wrap"}}>
-      <button style={C.btnS} onClick={onBack}>← Back</button>
-      <button style={C.btnS} disabled={!canUndo} onClick={undo} title="Undo">↩ Undo</button>
-      <button style={C.btnS} disabled={!canRedo} onClick={redo} title="Redo">↪ Redo</button>
-      <h2 style={{margin:0,fontSize:15,fontWeight:600}}>{isNew?"New Project":`Edit: ${project.projectName}`}</h2>
+      <button style={C.btnS} onClick={goBack}>← Back</button>
+      <button style={C.btnS} disabled={readOnly||!canUndo} onClick={undo} title="Undo">↩ Undo</button>
+      <button style={C.btnS} disabled={readOnly||!canRedo} onClick={redo} title="Redo">↪ Redo</button>
+      <h2 style={{margin:0,fontSize:15,fontWeight:600}}>{isNew?"New Project":`${readOnly?"View":"Edit"}: ${project.projectName}`}</h2>
       {autoSaveStatus&&<span style={{fontSize:12,color:"#ea580c"}}>{autoSaveStatus}</span>}
       {msg.t&&<span style={msg.tp==="err"?C.err:C.ok}>{msg.t}</span>}
     </div>
+
+    {/* Edit-lock banner */}
+    {readOnly&&(()=>{
+      const who=lockInfo?.username, at=lockInfo?.since?new Date(lockInfo.since).toLocaleString():"";
+      const box={display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",padding:"10px 14px",borderRadius:6,marginBottom:10,fontSize:13};
+      if(lockState==="checking")return<div style={{...box,background:"#f4f4f4",color:"#666"}}>Checking whether someone else has this project open…</div>;
+      if(lockState==="offline")return<div style={{...box,background:"#fef2f2",border:"1px solid #fecaca",color:"#b91c1c"}}>Couldn't reach the server, so this project is open read-only.<button style={C.btnS} onClick={()=>onReopen&&onReopen(false,projectIdRef.current)}>Try again</button></div>;
+      if(lockState==="other")return<div style={{...box,background:"#fff7ed",border:"1px solid #fed7aa",color:"#9a3412"}}>
+        <span>🔒 <strong>Read-only</strong> — <strong>{who}</strong> is editing this project{at&&<> (since {at})</>}. You can view and export it, but not change it.</span>
+        <span style={{marginLeft:"auto",display:"flex",gap:8}}>
+          <button style={C.btnS} onClick={()=>onReopen&&onReopen(false,projectIdRef.current)}>Try again</button>
+          {isAdmin(user)&&<button style={C.btnD} onClick={()=>{if(window.confirm(`Take over editing from ${who}? Their draft is kept, but they can no longer save.`))onReopen&&onReopen(true,projectIdRef.current);}}>Take over</button>}
+        </span>
+      </div>;
+      return<div style={{...box,background:"#fef2f2",border:"1px solid #fecaca",color:"#b91c1c"}}>
+        <span>⚠ <strong>Editing stopped</strong> — {who?<><strong>{who}</strong> took over this project.</>:<>an admin discarded this draft or took over the project.</>} Changes made after the last "Draft saved ✓" were not saved.</span>
+        <button style={{...C.btnS,marginLeft:"auto"}} onClick={()=>onReopen&&onReopen(false,projectIdRef.current)}>Reopen</button>
+      </div>;
+    })()}
+
+    {/* While read-only every input and button below is disabled */}
+    <fieldset disabled={readOnly} style={{border:0,padding:0,margin:0,minWidth:0}}>
 
     {/* Details */}
     <div style={{...C.card,marginBottom:10}}>
@@ -3122,9 +3300,10 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
       <p style={C.sT}>Brand factors for this project</p>
       {allBrands.length===0&&<p style={{fontSize:13,color:"#888"}}>Add items to see brands.</p>}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(180px,1fr))",gap:8}}>
-        {allBrands.map(brand=><div key={brand}><label style={C.label}>{brand} <span style={{color:"#aaa"}}>×{(settings.defaultBrandFactors[brand]??1).toFixed(2)} default</span></label><input style={C.input} type="number" step="0.01" min="0" value={brandFactors[brand]??1} onChange={e=>setBF(bf=>({...bf,[brand]:parseFloat(e.target.value)||0}))}/></div>)}
+        {allBrands.map(brand=>{const eff=factorSum.brands[brand];return<div key={brand}><label style={C.label}>{brand} <span style={{color:"#aaa"}}>×{(settings.defaultBrandFactors[brand]??1).toFixed(2)} default</span></label><input style={C.input} type="number" step="0.01" min="0" value={brandFactors[brand]??1} onChange={e=>setBF(bf=>({...bf,[brand]:parseFloat(e.target.value)||0}))}/>{eff?.custom&&<p style={{margin:"3px 0 0",fontSize:11,color:"#1d4ed8"}} title="Σ(GLP × qty × factor) ÷ Σ(GLP × qty), including items with a custom factor">effective ×{fmtFactor(eff.factor)} <span style={{color:"#888"}}>(custom item factors)</span></p>}</div>;})}
       </div>
-      <div style={{marginTop:9,maxWidth:200}}><label style={C.label}>Local factor</label><input style={C.input} type="number" step="0.01" value={localFactor} onChange={e=>{const v=parseFloat(e.target.value);if(!isNaN(v)&&v!==settings.defaultLocalFactor&&!warnLocal)setWarnLocal(true);setLF(isNaN(v)?1:v);}}/>{warnLocal&&<p style={{fontSize:12,color:"#ea580c",marginTop:3}}>⚠️ Changed from default</p>}</div>
+      <div style={{marginTop:9,maxWidth:200}}><label style={C.label}>Local factor</label><input style={C.input} type="number" step="0.01" value={localFactor} onChange={e=>{const v=parseFloat(e.target.value);if(!isNaN(v)&&v!==settings.defaultLocalFactor&&!warnLocal)setWarnLocal(true);setLF(isNaN(v)?1:v);}}/>{warnLocal&&<p style={{fontSize:12,color:"#ea580c",marginTop:3}}>⚠️ Changed from default</p>}{factorSum.local.custom&&<p style={{margin:"3px 0 0",fontSize:11,color:"#1d4ed8"}}>effective ×{fmtFactor(factorSum.local.factor)} <span style={{color:"#888"}}>(custom item factors)</span></p>}</div>
+      {allBrands.length>0&&<p style={{margin:"8px 0 0",fontSize:11,color:"#888"}}>Items without a custom factor use these. Press <strong>ƒ Factor</strong> on a row to give that one item its own brand and local factor.</p>}
     </div>
 
     {/* Line items */}
@@ -3175,6 +3354,7 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
             if(ssIsFirstInGroup||ssIsContStart){let j=idx;while(!ssOpen(lines[j])&&j+1<lines.length&&lines[j+1].mergeGroup===ssGrp){ssGroupSize++;j++;}}
             return(<SubsystemRow key={line.id} line={line} idx={idx}
               brandFactors={brandFactors} localFactor={localFactor} rate={rate} roundUp={roundUp} curr={curr}
+              setSSCustomFactors={setSSCustomFactors} updChildFactor={updChildFactor} resetRowNum={resetRowNum}
               updSS={updSS} delSS={delSS} dupLine={dupLine} toggleSSCollapse={toggleSSCollapse}
               addChildFromCatalog={addChildFromCatalog} addChildCustom={addChildCustom}
               updChild={updChild} delChild={delChild} dragChildOut={dragChildOut} reorderChildren={reorderChildren}
@@ -3260,7 +3440,7 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
           onDragEnter={e=>onDragEnter(e,idx)}
           onDragEnd={onDragEnd}
           onDragOver={onDragOver}
-          style={{background:line.optional?"#fffbf0":isSubEntry?"#fafafa":"#fff",cursor:isSubEntry?"grab":"grab",opacity:line.optional?0.75:1,borderLeft:grp?"3px solid #c0392b":"none"}}>
+          style={{background:line.optional?"#fffbf0":line.customFactor?"#eff6ff":isSubEntry?"#fafafa":"#fff",cursor:isSubEntry?"grab":"grab",opacity:line.optional?0.75:1,borderLeft:grp?"3px solid #c0392b":"none"}}>
           <td style={{...C.td,textAlign:"center",verticalAlign:"middle"}}>
             <input type="checkbox" checked={selectedIds.has(line.id)} onChange={()=>toggleSelect(line.id)}/>
           </td>
@@ -3279,7 +3459,7 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
                     onBlur={e=>{setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(null);}}
                     onKeyDown={e=>{if(e.key==="Enter"){setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(null);}if(e.key==="Escape")setEditingRowNum(null);}}
                   />
-                  {line.rowNumOverride&&<div style={{fontSize:9,color:"#c0392b",cursor:"pointer",marginTop:1}} onClick={()=>{setRowNumOverride(line.id,"");setEditingRowNum(null);}}>↺ auto</div>}
+                  {line.rowNumOverride&&<div style={{fontSize:9,color:"#c0392b",cursor:"pointer",marginTop:1}} onMouseDown={e=>{e.preventDefault();resetRowNum(line.id);}}>↺ auto</div>}
                 </div>
               : <div style={{marginTop:2,cursor:"text"}} onClick={e=>{e.stopPropagation();setEditingRowNum(line.id);}}>
                   <span style={{fontSize:12,fontWeight:600,color:line.rowNumOverride?"#c0392b":"#555",borderBottom:line.rowNumOverride?"1px dashed #c0392b":"1px dashed transparent",padding:"0 2px"}}>{line.rowNum}</span>
@@ -3294,7 +3474,9 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
           <td style={{...C.td,fontSize:11,color:"#ea580c",maxWidth:120,whiteSpace:"pre-wrap"}}>{line.notes||""}</td>
           <td style={{...C.td,textAlign:"right",color:"#555"}}>{fmtN(line.glp,false)}</td>
           <td style={{...C.td,textAlign:"right",color:"#555"}}>{fmtN(line.local||0,false)}</td>
-          <td style={{...C.td,textAlign:"right"}}>{fmtN(line.optional?applyRounding(calcUnitPrice(line,brandFactors,localFactor),roundUp,rate):lineUnitDisp(line),false)}</td>
+          <td style={{...C.td,textAlign:"right"}}>{fmtN(line.optional?applyRounding(calcUnitPrice(line,brandFactors,localFactor),roundUp,rate):lineUnitDisp(line),false)}
+            {line.customFactor&&<FactorInputs item={line} brandFactors={brandFactors} localFactor={localFactor} onChange={(f,v)=>updLine(line.id,f,v)}/>}
+          </td>
           <td style={{...C.td,textAlign:"center"}}>
             {line.optional
               ? <span style={{fontSize:12,color:"#888",fontStyle:"italic"}}>Optional</span>
@@ -3314,6 +3496,9 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
       Opt.
     </label>
     {line.isCustom&&<button style={{...C.btnS,padding:"2px 4px",fontSize:10,whiteSpace:"nowrap"}} onClick={()=>saveLineToPriceList(line)} title="Save to price list">💾</button>}
+    {line.customFactor
+      ?<button style={{...C.btnS,...factorBtn,background:"#dbeafe"}} onClick={()=>setCustomFactor(line.id,false)} title="Cancel the custom factor — this item goes back to the project's brand and local factor">✕ Factor</button>
+      :<button style={{...C.btnS,...factorBtn}} onClick={()=>setCustomFactor(line.id,true)} title="Give this item its own brand and local factor">ƒ Factor</button>}
   </div>
 </td>
         </tr>);})}</tbody>
@@ -3418,20 +3603,12 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
 
     {/* Brand summary — internal */}
     {lines.length>0&&(()=>{
+      // Factor = effective factor from Σ(GLP × qty × factor) = GLP_total × Factor_total.
+      // "After factor" is converted to the project currency (and rounded up if that is on).
       const bMap={};
-      lines.filter(l=>l.type!=="section"&&!l.optional).forEach(l=>{
-        if(l.type==="subsystem"){if(l.optional)return;(l.children||[]).filter(c=>!c.optional).forEach(c=>{const b=c.brand||"Other";if(!bMap[b])bMap[b]={glp:0,factored:0,factor:brandFactors[b]??1};bMap[b].glp+=c.glp*c.qty*(l.qty||1);bMap[b].factored=bMap[b].glp*(brandFactors[b]??1);});return;}
-        const b=l.brand||"Other";
-        if(!bMap[b])bMap[b]={glp:0,factored:0,factor:brandFactors[b]??1};
-        bMap[b].glp+=l.glp*(l.qty||1);
-        bMap[b].factored=bMap[b].glp*(brandFactors[b]??1);
-      });
-      const totalLocalRaw=lines.filter(l=>l.type!=="section").reduce((s,l)=>{
-        if(l.type==="subsystem"){if(l.optional)return s;return s+(l.children||[]).filter(c=>!c.optional).reduce((s2,c)=>s2+(c.local||0)*c.qty*(l.qty||1),0);}
-        if(l.optional)return s;
-        return s+(l.local||0)*(l.qty||1);
-      },0);
-      const totalLocalFactored=conv(totalLocalRaw*(localFactor??1));
+      Object.entries(factorSum.brands).forEach(([b,v])=>{bMap[b]={...v,factored:conv(v.factored)};});
+      const totalLocalRaw=factorSum.local.raw;
+      const totalLocalFactored=conv(factorSum.local.factored);
       const tGLP=Object.values(bMap).reduce((s,v)=>s+v.glp,0);
       const tFactored=Object.values(bMap).reduce((s,v)=>s+v.factored,0)+totalLocalFactored;
       return(
@@ -3449,7 +3626,7 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
                 <tr key={b} style={{background:"#fff"}}>
                   <td style={C.td}><strong>{b}</strong></td>
                   <td style={{...C.td,textAlign:"right"}}>{fmtN(v.glp,false)}</td>
-                  <td style={{...C.td,textAlign:"center"}}>×{v.factor.toFixed(2)}</td>
+                  <td style={{...C.td,textAlign:"center"}} title={v.custom?"Effective factor: Σ(GLP × qty × factor) ÷ Σ(GLP × qty) — includes custom item factors":undefined}>×{fmtFactor(v.factor)}{v.custom&&<span style={{color:"#1d4ed8"}}> ★</span>}</td>
                   <td style={{...C.td,textAlign:"right",fontWeight:500}}>{fmtN(v.factored,roundUp)}</td>
                 </tr>
               ))}
@@ -3457,7 +3634,7 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
                 <tr style={{background:"#f0f7ff"}}>
                   <td style={{...C.td,fontStyle:"italic"}}>Local</td>
                   <td style={{...C.td,textAlign:"right"}}>{fmtN(totalLocalRaw,false)}</td>
-                  <td style={{...C.td,textAlign:"center"}}>×{(localFactor??1).toFixed(2)}</td>
+                  <td style={{...C.td,textAlign:"center"}}>×{fmtFactor(factorSum.local.factor)}{factorSum.local.custom&&<span style={{color:"#1d4ed8"}}> ★</span>}</td>
                   <td style={{...C.td,textAlign:"right",fontWeight:500}}>{fmtN(totalLocalFactored,roundUp)}</td>
                 </tr>
               )}
@@ -3484,10 +3661,12 @@ function ProjectEditor({project,user,settings,priceList,onBack}){
       </div>
     </div>}
 
+    </fieldset>
+
     <div style={{display:"flex",gap:10,justifyContent:"flex-end",marginBottom:24}}>
-      <button style={C.btnS} onClick={onBack}>Back</button>
-      <button style={{...C.btnS,borderColor:"#2563eb",color:"#2563eb",opacity:savingDraft?0.6:1}} onClick={handleSaveDraft} disabled={savingDraft||submitting}>💾 {savingDraft?"Saving…":"Save draft"}</button>
-      <button style={{...C.btnP,opacity:submitting?0.6:1}} onClick={handleSubmit} disabled={savingDraft||submitting}>{submitting?"Submitting…":"Submit revision"}</button>
+      <button style={C.btnS} onClick={goBack}>Back</button>
+      <button style={{...C.btnS,borderColor:"#2563eb",color:"#2563eb",opacity:savingDraft||readOnly?0.6:1}} onClick={handleSaveDraft} disabled={readOnly||savingDraft||submitting}>💾 {savingDraft?"Saving…":"Save draft"}</button>
+      <button style={{...C.btnP,opacity:submitting||readOnly?0.6:1}} onClick={handleSubmit} disabled={readOnly||savingDraft||submitting}>{submitting?"Submitting…":"Submit revision"}</button>
     </div>
   </div>);
 }
@@ -3512,7 +3691,17 @@ function ProjectsTab({user,settings}){
   const doGrant=async()=>{if(!grantUser.trim())return;const uL=grantUser.toLowerCase().trim();const users=await loadUsers();if(!users.find(u=>u.username.toLowerCase()===uL)){alert("User not found.");return;}const r=await grantAccess(grantModal.id,uL);if(!r.ok){alert("Could not reach the server — access was not granted. Check your connection and try again.");return;}reload();setGrantModal(null);setGrantUser("");};
   const doRevoke=async(projId,username)=>{const r=await revokeAccess(projId,username);if(!r.ok){alert("Could not reach the server — access was not revoked.");return;}reload();};
   const doDelete=async id=>{if(!window.confirm("Delete project and all revisions?"))return;const r=await deleteProject(id);if(!r.ok){alert("Could not reach the server — project was not deleted.");return;}reload();};
-  const doForceUnlock=async projId=>{const r=await clearDraft(projId);if(!r.ok){alert("Could not reach the server — draft was not cleared.");return;}reload();setUnlockConfirm(null);};
+  // Admin "Discard draft": deletes the unsubmitted draft and frees the edit lock (cannot be undone).
+  const doDiscardDraft=async projId=>{const r=await clearDraft(projId);if(!r.ok){alert("Could not reach the server — draft was not discarded.");return;}reload();setUnlockConfirm(null);};
+  // Opening the editor. takeover:true = admin takes the edit lock from whoever holds it.
+  // The editor is re-mounted (editKey) with freshly loaded data whenever it is reopened.
+  const [editTakeover,setEditTakeover]=useState(false),[editKey,setEditKey]=useState(0);
+  const openEditor=(proj,takeover=false)=>{setEditTakeover(!!takeover);setEditKey(k=>k+1);setEditing(proj);};
+  const reopenEditor=async(takeover,projId)=>{
+    const fresh=await loadProjects();setProjects(fresh);
+    const p=fresh.find(x=>x.id===(projId||editing?.id));
+    if(p)openEditor(p,takeover);else{setEditing(null);reload();}
+  };
 
   const openDuplicate=proj=>{
     setDupModal(proj);
@@ -3548,12 +3737,12 @@ function ProjectsTab({user,settings}){
       const updated=await loadProjects();
       const newProj=updated.find(p=>p.id===cr.id)||{...np,draft:{...draftPayload,_savedBy:user.username||user.displayName,_savedAt:now()}};
       setProjects(updated);
-      setEditing(newProj);
+      openEditor(newProj);
     }catch(e){setDupErr("Something went wrong — duplicate was not created.");setDupBusy(false);}
   };
 
-  if(editing==="new")return<ProjectEditor project={null} user={user} settings={settings} priceList={priceList} onBack={()=>{reload();setEditing(null);}}/>;
-  if(editing)return<ProjectEditor project={editing} user={user} settings={settings} priceList={priceList} onBack={()=>{reload();setEditing(null);}}/>;
+  if(editing==="new")return<ProjectEditor key={"new-"+editKey} project={null} user={user} settings={settings} priceList={priceList} onBack={()=>{reload();setEditing(null);}} onReopen={reopenEditor}/>;
+  if(editing)return<ProjectEditor key={editing.id+"-"+editKey} project={editing} takeover={editTakeover} user={user} settings={settings} priceList={priceList} onBack={()=>{reload();setEditing(null);}} onReopen={reopenEditor}/>;
 
   if(viewRev){
     const{project:proj,revIdx}=viewRev;
@@ -3636,26 +3825,29 @@ function ProjectsTab({user,settings}){
     {loading&&<p style={{color:"#888",fontSize:13}}>Loading…</p>}
     {!loading&&visible.length===0&&<p style={{fontSize:13,color:"#888"}}>No projects yet.</p>}
     {visible.map(proj=>{
-      const hasDraft=!!proj.draft,draftBy=proj.draft?._savedBy,draftAt=proj.draft?._savedAt?new Date(proj.draft._savedAt).toLocaleString():"";
-      const draftByOther=hasDraft&&draftBy&&draftBy!==user.username&&draftBy!==user.displayName;
+      const hasDraft=!!proj.draft,draftBy=draftOwner(proj.draft),draftAt=draftTime(proj.draft);
+      const lockBy=proj.lock?.username,lockAt=proj.lock?.since?new Date(proj.lock.since).toLocaleString():"";
+      const lockedByOther=!!lockBy&&lockBy.toLowerCase()!==String(user.username).toLowerCase();
       return(<div key={proj.id} style={{...C.card,marginBottom:10}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:8}}>
           <div>
             <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
               <p style={{margin:0,fontWeight:600,fontSize:14}}>{proj.projectName}</p>
               <span style={C.badge(proj.status==="submitted"?"green":"gray")}>{proj.status}</span>
-              {hasDraft&&<span style={C.badge("orange")}>draft — {draftBy} {draftAt}</span>}
+              {hasDraft&&<span style={C.badge("orange")} title="Unsubmitted changes">draft{draftBy&&<> — {draftBy}</>}{draftAt&&<> · {draftAt}</>}</span>}
+              {lockBy&&<span style={C.badge("blue")} title={`Open in the editor since ${lockAt}`}>🔒 editing: {lockBy}</span>}
               {isAdminUser&&proj.ownedBy&&<span style={{fontSize:12,color:"#888"}}>by {proj.ownedBy}</span>}
             </div>
-            {draftByOther&&<p style={{margin:"4px 0 0",fontSize:12,color:"#ea580c"}}>⚠️ Open draft by {draftBy} — last save wins.</p>}
+            {lockedByOther&&<p style={{margin:"4px 0 0",fontSize:12,color:"#ea580c"}}>🔒 {lockBy} is editing this project right now — it will open read-only for you.</p>}
             <p style={{margin:"2px 0 0",fontSize:12,color:"#888"}}>{proj.client&&<>{proj.client} · </>}{proj.engineerName&&<>{proj.engineerName} · </>}{proj.revisions?.length||0} rev{(proj.revisions?.length||0)!==1?"s":""}{(proj.revisions?.length||0)>0&&` · ${proj.revisions[proj.revisions.length-1].code}`}</p>
             {(proj.grantedTo||[]).length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:4}}>{proj.grantedTo.map(u=><span key={u} style={C.badge("blue")}>{u}{isAdminUser&&<span onClick={()=>doRevoke(proj.id,u)} style={{marginLeft:3,cursor:"pointer",fontWeight:700}}>×</span>}</span>)}</div>}
           </div>
           <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
             {(proj.revisions?.length||0)>0&&<select style={{...C.input,maxWidth:170,fontSize:12}} onChange={e=>{if(e.target.value!=="")setViewRev({project:proj,revIdx:parseInt(e.target.value)});}} defaultValue=""><option value="">View revision…</option>{proj.revisions.map((r,i)=><option key={i} value={i}>Rev-{i}: {r.code}</option>)}</select>}
-            {canEdit(proj)&&<button style={C.btnS} onClick={()=>setEditing(proj)}>Edit</button>}
+            {canEdit(proj)&&<button style={C.btnS} onClick={()=>openEditor(proj)}>{lockedByOther?"View":"Edit"}</button>}
             {canEdit(proj)&&<button style={C.btnS} onClick={()=>openDuplicate(proj)}>📋 Duplicate</button>}
-            {isAdminUser&&hasDraft&&<button style={C.btnD} onClick={()=>setUnlockConfirm(proj)}>Force unlock</button>}
+            {isAdminUser&&lockedByOther&&<button style={C.btnS} title="Open the editor and take the edit lock — the draft is kept" onClick={()=>{if(window.confirm(`Take over editing from ${lockBy}? Their draft is kept, but they can no longer save.`))openEditor(proj,true);}}>Take over</button>}
+            {isAdminUser&&(hasDraft||lockBy)&&<button style={C.btnD} onClick={()=>setUnlockConfirm(proj)}>Discard draft</button>}
             {isAdminUser&&<button style={C.btnS} onClick={()=>setGrantModal(proj)}>Grant access</button>}
             {isAdminUser&&<button style={C.btnD} onClick={()=>doDelete(proj.id)}>Delete</button>}
           </div>
@@ -3680,7 +3872,13 @@ function ProjectsTab({user,settings}){
         <button style={C.btnS} onClick={()=>{setDupModal(null);setDupErr("");}}>Cancel</button>
       </div>
     </div></div>}
-    {unlockConfirm&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:300}}><div style={{...C.card,width:360}}><p style={{margin:"0 0 8px",fontWeight:600,fontSize:14}}>Force unlock — {unlockConfirm.projectName}</p><p style={{margin:"0 0 14px",fontSize:13,color:"#555"}}>This will discard the draft by <strong>{unlockConfirm.draft?._savedBy}</strong>. Are you sure?</p><div style={{display:"flex",gap:8}}><button style={C.btnD} onClick={()=>doForceUnlock(unlockConfirm.id)}>Yes, discard</button><button style={C.btnS} onClick={()=>setUnlockConfirm(null)}>Cancel</button></div></div></div>}
+    {unlockConfirm&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:300}}><div style={{...C.card,width:380}}>
+      <p style={{margin:"0 0 8px",fontWeight:600,fontSize:14}}>Discard draft — {unlockConfirm.projectName}</p>
+      <p style={{margin:"0 0 8px",fontSize:13,color:"#555"}}>{unlockConfirm.draft?<>This permanently deletes the unsubmitted draft{draftOwner(unlockConfirm.draft)&&<> last saved by <strong>{draftOwner(unlockConfirm.draft)}</strong></>}. The project goes back to its last submitted revision.</>:<>There is no saved draft, but the edit lock will be released.</>}</p>
+      {unlockConfirm.lock&&<p style={{margin:"0 0 8px",fontSize:13,color:"#ea580c"}}><strong>{unlockConfirm.lock.username}</strong> has it open right now — their editor will stop saving and switch to read-only.</p>}
+      <p style={{margin:"0 0 14px",fontSize:13,color:"#b91c1c",fontWeight:600}}>This cannot be undone.</p>
+      <div style={{display:"flex",gap:8}}><button style={C.btnD} onClick={()=>doDiscardDraft(unlockConfirm.id)}>Yes, discard</button><button style={C.btnS} onClick={()=>setUnlockConfirm(null)}>Cancel</button></div>
+    </div></div>}
   </div>);
 }
 

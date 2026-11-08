@@ -122,6 +122,16 @@ db.exec(`
     savedBy   TEXT,
     savedAt   TEXT NOT NULL
   );
+
+  -- Who currently has a project open in the editor (v1.1.0).
+  -- lockId identifies one editor window, so the same user's second tab is read-only too.
+  CREATE TABLE IF NOT EXISTS edit_locks (
+    projectId TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    username  TEXT NOT NULL,
+    lockId    TEXT NOT NULL,
+    since     TEXT NOT NULL,
+    heartbeat INTEGER NOT NULL
+  );
 `);
 
 // ─── Migration: add columns if upgrading from an older DB file ────────────────
@@ -169,12 +179,44 @@ function hydrateProject(row) {
     "SELECT * FROM revisions WHERE projectId=? ORDER BY revIndex ASC"
   ).all(row.id);
   const draftRow = db.prepare("SELECT * FROM drafts WHERE projectId=?").get(row.id);
+  const lock = activeLock(row.id);
   return {
     ...row,
     grantedTo: p(row.grantedTo) || [],
     revisions: revRows.map(hydrateRev),
     draft: draftRow ? { ...draftRow, data: p(draftRow.data) } : null,
+    lock: lock ? { username: lock.username, since: lock.since } : null,
   };
+}
+
+// ─── Edit locks ───────────────────────────────────────────────────────────────
+// An open editor sends a heartbeat every 30 s. A lock nobody has refreshed for
+// LOCK_TTL (closed browser, crash, lost network) is treated as free.
+const LOCK_TTL = 2 * 60 * 1000;
+const lockRow    = projectId => db.prepare("SELECT * FROM edit_locks WHERE projectId=?").get(projectId);
+const isStale    = l => !l || Date.now() - l.heartbeat > LOCK_TTL;
+const activeLock = projectId => { const l = lockRow(projectId); return isStale(l) ? null : l; };
+const validLockId = id => typeof id === "string" && /^[A-Za-z0-9_-]{6,64}$/.test(id);
+
+function setLock(projectId, username, lockId, keepSince) {
+  db.prepare(`INSERT INTO edit_locks(projectId,username,lockId,since,heartbeat) VALUES(?,?,?,?,?)
+              ON CONFLICT(projectId) DO UPDATE SET username=excluded.username, lockId=excluded.lockId,
+                since=excluded.since, heartbeat=excluded.heartbeat`)
+    .run(projectId, username, lockId, keepSince || now(), Date.now());
+}
+
+// Writes to a project's draft / revisions are only accepted from the editor window
+// that holds its lock (sent in the X-Edit-Lock header). A lock that went stale is
+// still honoured as long as nobody else has taken it in the meantime.
+function holdsLock(req, res, projectId) {
+  const id = req.headers["x-edit-lock"];
+  const l = lockRow(projectId);
+  if (!l || !validLockId(id) || l.lockId !== id) {
+    res.status(409).json({ ok: false, error: "lock_lost", lock: l && !isStale(l) ? { username: l.username, since: l.since } : null });
+    return false;
+  }
+  db.prepare("UPDATE edit_locks SET heartbeat=? WHERE projectId=?").run(Date.now(), projectId);
+  return true;
 }
 
 // Hydrate a price_list row: parse children JSON, drop type-irrelevant fields for clarity
@@ -474,11 +516,35 @@ app.post("/api/projects", (req, res) => {
     INSERT INTO projects(id,projectName,client,engineerName,refNumber,systemType,ownedBy,grantedTo,status,createdAt,updatedAt)
     VALUES(@id,@projectName,@client,@engineerName,@refNumber,@systemType,@ownedBy,@grantedTo,@status,@createdAt,@updatedAt)
   `).run(rec);
+  // The editor window that creates a project holds its edit lock straight away.
+  if (validLockId(req.headers["x-edit-lock"])) setLock(rec.id, req.user.username, req.headers["x-edit-lock"]);
   res.json({ ok: true, id: rec.id });
+});
+
+// Acquire / refresh the edit lock. The editor calls this when it opens and then
+// every 30 s as a heartbeat. { takeover:true } lets an admin take it from someone else.
+app.post("/api/projects/:id/lock", (req, res) => {
+  if (!projectOr404(req, res)) return;
+  const { lockId, takeover } = req.body || {};
+  if (!validLockId(lockId)) return res.status(400).json({ ok: false, error: "bad_request" });
+  const l = lockRow(req.params.id);
+  const mine = l && l.lockId === lockId;
+  if (!mine && !isStale(l) && !(takeover && isAdmin(req.user)))
+    return res.status(409).json({ ok: false, error: "locked", lock: { username: l.username, since: l.since } });
+  setLock(req.params.id, req.user.username, lockId, mine ? l.since : null);
+  res.json({ ok: true, lock: { username: req.user.username, since: mine ? l.since : now() } });
+});
+
+// Release the lock (editor closed / Back / tab closed). Only the holder's window can release it.
+app.post("/api/projects/:id/unlock", (req, res) => {
+  const { lockId } = req.body || {};
+  if (validLockId(lockId)) db.prepare("DELETE FROM edit_locks WHERE projectId=? AND lockId=?").run(req.params.id, lockId);
+  res.json({ ok: true });
 });
 
 app.put("/api/projects/:id", (req, res) => {
   if (!projectOr404(req, res)) return;
+  if (!holdsLock(req, res, req.params.id)) return; // only the editor holding the lock renames / edits details
   const allowed = ["projectName", "client", "engineerName", "refNumber", "systemType", "status"];
   if (isAdmin(req.user)) allowed.push("ownedBy", "grantedTo");
   const data = {};
@@ -520,6 +586,7 @@ const REV_FIELDS = ["projectName","client","engineerName","salesEngineer","conta
 
 app.post("/api/projects/:id/revisions", (req, res) => {
   if (!projectOr404(req, res)) return;
+  if (!holdsLock(req, res, req.params.id)) return;
   const projectId = req.params.id;
   const b = req.body || {};
   const revIndex  = db.prepare(
@@ -567,6 +634,7 @@ app.post("/api/projects/:id/revisions", (req, res) => {
 // ─── Drafts ───────────────────────────────────────────────────────────────────
 app.post("/api/projects/:id/draft", (req, res) => {
   if (!projectOr404(req, res)) return;
+  if (!holdsLock(req, res, req.params.id)) return;
   const { data } = req.body || {};
   db.prepare(`
     INSERT INTO drafts(projectId,data,savedBy,savedAt) VALUES(?,?,?,?)
@@ -576,9 +644,14 @@ app.post("/api/projects/:id/draft", (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete("/api/projects/:id/draft", (req, res) => {
+// Admin "Discard draft": throws the unsubmitted draft away and frees the edit lock.
+// Whoever still has the editor open gets "lock_lost" on their next save and goes read-only.
+app.delete("/api/projects/:id/draft", adminOnly, (req, res) => {
   if (!projectOr404(req, res)) return;
-  db.prepare("DELETE FROM drafts WHERE projectId=?").run(req.params.id);
+  db.transaction(() => {
+    db.prepare("DELETE FROM drafts WHERE projectId=?").run(req.params.id);
+    db.prepare("DELETE FROM edit_locks WHERE projectId=?").run(req.params.id);
+  })();
   res.json({ ok: true });
 });
 
@@ -723,6 +796,8 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`  Network: http://${ip}:${PORT}`);
   console.log("  Share the Network URL with your team.");
   console.log("========================================\n");
-  const { exec } = require("child_process");
-  exec(`start http://localhost:${PORT}`);
+  if (!process.env.MSCC_NO_BROWSER) {
+    const { exec } = require("child_process");
+    exec(`start http://localhost:${PORT}`);
+  }
 });
