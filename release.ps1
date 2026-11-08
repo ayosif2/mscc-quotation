@@ -23,7 +23,8 @@ $pkg = [regex]::Replace($pkg, '"version"\s*:\s*"[^"]*"', "`"version`": `"$Versio
 
 # 2. snapshot
 $files = "server.js","auth-utils.js","reset-password.js","migrate.js","package.json","package-lock.json",
-         "index.html","vite.config.js","start.bat","start-on-desktop2.ps1","INSTALL.txt","CHANGELOG.md","release.ps1"
+         "index.html","vite.config.js","start.bat","start-on-desktop2.ps1","INSTALL.txt","CHANGELOG.md","release.ps1",
+         "README.md",".gitignore"
 New-Item -ItemType Directory -Force (Join-Path $dest "SRC"), (Join-Path $dest "public\templates") | Out-Null
 foreach ($f in $files) { if (Test-Path $f) { Copy-Item $f $dest } }
 Copy-Item "SRC\*.jsx" (Join-Path $dest "SRC")

@@ -1,0 +1,26 @@
+# ── Data — never upload ──────────────────────────────────────────────
+mscc_data.db
+mscc_data.db-*
+*.db
+*.db-wal
+*.db-shm
+mscc_data.json
+mscc_backup_*.json
+FIRST_RUN_ADMIN.txt
+
+# ── Version snapshots (kept locally; on GitHub every version is a git tag) ──
+versions/
+
+# ── Build output / dependencies / tools ──────────────────────────────
+node_modules/
+dist/
+cloudflared.exe
+*.exe
+npm
+
+# ── Editor / OS clutter ──────────────────────────────────────────────
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.log

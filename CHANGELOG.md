@@ -4,6 +4,10 @@ Each released version's source code is kept in `versions\v<version>\`.
 To make a new version: `.\release.ps1 1.2.0` (in PowerShell, in the MSCC folder), then run `start.bat`.
 Numbering: PATCH 1.1.x = bug fix · MINOR 1.x.0 = new feature · MAJOR x.0.0 = data/format change.
 
+## v1.1.1 - 2026-11-08
+- The version label (top bar and sign-in screen) now links to https://github.com/ayosif2.
+  The MSCC logo still links to the company website.
+
 ## v1.1.0 - 2026-11-08
 
 ### Edit locking (replaces "last save wins")
