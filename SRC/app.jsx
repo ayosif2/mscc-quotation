@@ -3740,11 +3740,22 @@ function ProjectsTab({user,settings}){
       const seedData=latestRev?JSON.parse(JSON.stringify(latestRev.data||latestRev)):{};
       const engineerName=!isAdminUser?(user.displayName||user.username):(src.engineerName||"");
       const np={id:uid(),projectName:dupFields.projectName.trim(),client:dupFields.client,engineerName,refNumber:dupFields.refNumber,systemType:dupFields.systemType,ownedBy:isAdminUser?null:user.username,grantedTo:[],status:"draft",createdAt:now()};
-      const cr=await createProject(np);
-      if(!cr.ok){setDupErr("Could not reach the server — duplicate was not created.");setDupBusy(false);return;}
+      // The server only accepts draft saves from a holder of the project's edit lock (v1.1.0),
+      // so the duplicate is created and filled under a short lock of its own, released right
+      // after; the editor that opens next then takes its own lock as usual.
+      const dupLock=uid()+uid(), prevLock=currentEditLock;
+      currentEditLock=dupLock;
       const draftPayload={...seedData,projectName:np.projectName,client:np.client,refNumber:np.refNumber,systemType:np.systemType,engineerName:np.engineerName,date:new Date().toISOString().slice(0,10)};
-      const dr=await saveDraft(cr.id,draftPayload,user.username||user.displayName);
-      if(!dr.ok){setDupErr("Could not reach the server — duplicate was created but its content could not be saved.");setDupBusy(false);return;}
+      let cr,dr;
+      try{
+        cr=await createProject(np);
+        if(cr.ok)dr=await saveDraft(cr.id,draftPayload,user.username||user.displayName);
+      }finally{
+        currentEditLock=prevLock;
+        if(cr?.ok)await releaseLock(cr.id,dupLock);
+      }
+      if(!cr.ok){setDupErr("Could not reach the server — duplicate was not created.");setDupBusy(false);return;}
+      if(!dr?.ok){setDupErr("Could not reach the server — duplicate was created but its content could not be saved.");setDupBusy(false);return;}
       setDupModal(null);setDupBusy(false);
       const updated=await loadProjects();
       const newProj=updated.find(p=>p.id===cr.id)||{...np,draft:{...draftPayload,_savedBy:user.username||user.displayName,_savedAt:now()}};

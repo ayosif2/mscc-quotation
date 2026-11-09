@@ -4,6 +4,13 @@ Each released version's source code is kept in `versions\v<version>\`.
 To make a new version: `.\release.ps1 1.2.0` (in PowerShell, in the MSCC folder), then run `start.bat`.
 Numbering: PATCH 1.1.x = bug fix · MINOR 1.x.0 = new feature · MAJOR x.0.0 = data/format change.
 
+## v1.2.1 - 2026-11-09
+- Fixed: **Duplicate** failed with "Could not reach the server — duplicate was created but its content could
+  not be saved" (since v1.1.0, the server only accepts draft saves from the holder of the edit lock, and
+  Duplicate saved without one). Duplicate now takes a short lock while it creates and fills the copy, then
+  releases it before the editor opens.
+- Duplicates left behind by the bug are empty projects named "… (Copy)" — an admin can delete them.
+
 ## v1.2.0 - 2026-11-08
 - Settings → Templates: new checkbox **Include the Terms & Conditions page** on each template.
   Unticked = the Quotation and Quotation with P/N PDFs that use that template leave out the T&C page
