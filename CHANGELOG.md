@@ -4,6 +4,20 @@ Each released version's source code is kept in `versions\v<version>\`.
 To make a new version: `.\release.ps1 1.2.0` (in PowerShell, in the MSCC folder), then run `start.bat`.
 Numbering: PATCH 1.1.x = bug fix · MINOR 1.x.0 = new feature · MAJOR x.0.0 = data/format change.
 
+## v1.3.0 - 2026-11-11
+Phase 1 of the Cloudflare Workers plan: make the app light enough for the free tier — and faster today.
+- **Projects list is a short summary**: revision codes and the draft owner only. A project's full contents
+  load when you open, view or duplicate it. Measured on the real data: 8.4 MB → 290 KB (55 KB on the wire).
+- **Compression**: server responses and the website's JavaScript are gzipped (website JS 1.4 MB → 387 KB),
+  and the JS is cached by the browser until the next version.
+- **Price list is cached**: after the first load the browser only checks whether it changed
+  (0.3 KB instead of ~250 KB) and reloads it only after a price-list edit.
+- **Database indexes** on revisions and usernames (each project's revisions used to scan the whole table).
+- **Connection badge** uses a tiny check every 60 s instead of re-downloading all settings every 20 s.
+- **Usage counter**: Settings → **Usage** shows server requests per day (UTC), data sent and average time,
+  and the busiest requests, compared with the Workers free limit of 100,000 requests/day.
+- Upgrading: run `start.bat`. The indexes and the usage table are added automatically; no data changes.
+
 ## v1.2.1 - 2026-11-09
 - Fixed: **Duplicate** failed with "Could not reach the server — duplicate was created but its content could
   not be saved" (since v1.1.0, the server only accepts draft saves from the holder of the edit lock, and

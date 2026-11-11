@@ -59,7 +59,7 @@ async function apiFetch(path, opts={}) {
   return r.ok ? r.data : null;
 }
 // Lightweight reachability probe, reusing the existing /settings endpoint so no new backend route is required.
-async function checkConnection(){ if(API) await apiCall("/settings"); }
+async function checkConnection(){ if(API) await apiCall("/ping"); } // tiny request (v1.3.0; used to re-download all settings)
 
 const uid = () => Math.random().toString(36).slice(2,9) + Date.now().toString(36).slice(-4);
 const now = () => new Date().toISOString();
@@ -104,7 +104,11 @@ async function appendPriceList(items) { if(API){const r=await apiCall("/pricelis
 async function updatePriceItem(item) { if(API){const r=await apiCall(`/pricelist/${item.id}`,{method:"PUT",body:JSON.stringify(item)});return{ok:r.ok};} const cur=LS.get("mscc_pricelist")||[]; LS.set("mscc_pricelist",cur.map(x=>x.id===item.id?item:x)); return{ok:true}; }
 async function addPriceItem(item) { if(API){const r=await apiCall("/pricelist",{method:"POST",body:JSON.stringify(item)});return{ok:r.ok};} const cur=LS.get("mscc_pricelist")||[]; LS.set("mscc_pricelist",[...cur,item]); return{ok:true}; }
 async function deletePriceItem(id) { if(API){const r=await apiCall(`/pricelist/${id}`,{method:"DELETE"});return{ok:r.ok};} const cur=LS.get("mscc_pricelist")||[]; LS.set("mscc_pricelist",cur.filter(x=>x.id!==id)); return{ok:true}; }
+// The list is a short summary per project (v1.3.0): revision codes and the draft's owner only.
 async function loadProjects() { if(API){const r=await apiFetch("/projects");if(r)return r;} return LS.get("mscc_projects")||[]; }
+// One project with all revision and draft contents — load this before editing, viewing or duplicating.
+async function loadProject(id) { if(API)return await apiFetch(`/projects/${id}`); return (LS.get("mscc_projects")||[]).find(p=>p.id===id)||null; }
+const ensureFullProject = async p => (p && p.summary ? await loadProject(p.id) : p);
 async function createProject(p) { if(API){const r=await apiCall("/projects",{method:"POST",body:JSON.stringify(p)});if(!r.ok)return{ok:false};return{ok:true,id:r.data?.id||p.id};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",[p,...cur]); return{ok:true,id:p.id}; }
 async function updateProject(p) { if(API){const r=await apiCall(`/projects/${p.id}`,{method:"PUT",body:JSON.stringify(p)});return{ok:r.ok,lockLost:r.status===409,lock:r.data?.lock};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",cur.map(x=>x.id===p.id?{...x,...p}:x)); return{ok:true}; }
 async function deleteProject(id) { if(API){const r=await apiCall(`/projects/${id}`,{method:"DELETE"});return{ok:r.ok};} const cur=LS.get("mscc_projects")||[]; LS.set("mscc_projects",cur.filter(x=>x.id!==id)); return{ok:true}; }
@@ -2064,7 +2068,7 @@ function ConnStatusBadge(){
   useEffect(()=>{
     if(!API)return; // nothing to poll in local-storage-only deployments
     checkConnection();
-    const iv=setInterval(checkConnection,20000);
+    const iv=setInterval(checkConnection,60000); // every real save/load also updates the badge
     const onFocus=()=>checkConnection();
     window.addEventListener("focus",onFocus);
     return()=>{clearInterval(iv);window.removeEventListener("focus",onFocus);};
@@ -2113,6 +2117,32 @@ function ChangePasswordModal({onClose}){
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
+// ─── Usage (v1.3.0) ───────────────────────────────────────────────────────────
+// Server requests per UTC day, recorded to size up a move to Cloudflare Workers
+// (free plan: 100,000 requests per day, reset at midnight UTC).
+function UsagePanel(){
+  const [u,setU]=useState(null),[err,setErr]=useState("");
+  useEffect(()=>{apiCall("/usage").then(r=>r.ok?setU(r.data):setErr("Could not load usage from the server."));},[]);
+  if(err)return<p style={C.err}>{err}</p>;
+  if(!u)return<p style={{color:"#888",fontSize:13}}>Loading…</p>;
+  const mb=b=>(b/1048576).toFixed(b>=10485760?0:1)+" MB";
+  const avg=(ms,n)=>n?Math.round(ms/n)+" ms":"—";
+  const pct=n=>((n/100000)*100).toFixed(1)+"%";
+  return(<div>
+    <p style={{fontSize:12,color:"#666",margin:"0 0 10px"}}>Requests to the server per day (UTC), counted since v1.3.0. For comparison, Cloudflare Workers' free plan allows 100,000 requests per day.</p>
+    {u.days.length===0&&<p style={{fontSize:13,color:"#888"}}>Nothing recorded yet.</p>}
+    {u.days.length>0&&<table style={{width:"100%",maxWidth:640,borderCollapse:"collapse",fontSize:13,marginBottom:16}}>
+      <thead style={{background:"#f4f4f4"}}><tr><th style={C.th}>Day (UTC)</th><th style={{...C.th,textAlign:"right"}}>Requests</th><th style={{...C.th,textAlign:"right"}}>Of free limit</th><th style={{...C.th,textAlign:"right"}}>Data sent</th><th style={{...C.th,textAlign:"right"}}>Avg time</th></tr></thead>
+      <tbody>{u.days.map(d=><tr key={d.day}><td style={C.td}>{d.day}</td><td style={{...C.td,textAlign:"right"}}>{d.requests.toLocaleString("en-US")}</td><td style={{...C.td,textAlign:"right"}}>{pct(d.requests)}</td><td style={{...C.td,textAlign:"right"}}>{mb(d.bytes)}</td><td style={{...C.td,textAlign:"right"}}>{avg(d.ms,d.requests)}</td></tr>)}</tbody>
+    </table>}
+    {u.routes.length>0&&<><p style={C.sT}>Busiest requests (last 30 days)</p>
+    <table style={{width:"100%",maxWidth:640,borderCollapse:"collapse",fontSize:13}}>
+      <thead style={{background:"#f4f4f4"}}><tr><th style={C.th}>Request</th><th style={{...C.th,textAlign:"right"}}>Count</th><th style={{...C.th,textAlign:"right"}}>Data sent</th><th style={{...C.th,textAlign:"right"}}>Avg time</th></tr></thead>
+      <tbody>{u.routes.map(r=><tr key={r.route}><td style={{...C.td,fontFamily:"monospace",fontSize:12}}>{r.route}</td><td style={{...C.td,textAlign:"right"}}>{r.requests.toLocaleString("en-US")}</td><td style={{...C.td,textAlign:"right"}}>{mb(r.bytes)}</td><td style={{...C.td,textAlign:"right"}}>{avg(r.ms,r.requests)}</td></tr>)}</tbody>
+    </table></>}
+  </div>);
+}
+
 function SettingsTab({onSaved}){
   const [S,setS]=useState(null),[saved,setSaved]=useState(false),[saveErr,setSaveErr]=useState(""),[tIdx,setTIdx]=useState(0),[newTpl,setNewTpl]=useState(""),[warnL,setWarnL]=useState(false),[pendL,setPendL]=useState(null),[sub,setSub]=useState("company");
   useEffect(()=>{loadSettings().then(setS);},[]);
@@ -2124,10 +2154,11 @@ function SettingsTab({onSaved}){
   const doBackup=async()=>{if(!API){alert("Backup requires the local server.");return;}try{const r=await fetch(`${API}/backup`,{headers:authHeaders()});setConnStatus("online");if(r.status===401){forceLogout();return;}if(r.status===403){alert("Only admins can download backups.");return;}if(!r.ok)throw new Error("bad status");const blob=await r.blob();const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`mscc_backup_${new Date().toISOString().slice(0,10)}.json`;a.click();}catch{setConnStatus("offline");alert("Could not reach the server — backup was not downloaded. Check your connection and try again.");}};
   const doRestore=async e=>{const f=e.target.files[0];if(!f)return;const text=await f.text();try{const data=JSON.parse(text);if(!API){alert("Restore requires the local server.");return;}const r=await apiCall("/backup/restore",{method:"POST",body:JSON.stringify(data)});if(!r.ok){alert(r.status===403?"Only the superadmin can restore a backup.":"Could not reach the server — restore did not complete. Check your connection and try again.");return;}alert("Restore complete. Reload the page.");}catch{alert("Invalid backup file.");}e.target.value="";};
   return(<div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><h2 style={{margin:0,fontSize:15,fontWeight:600}}>Global Settings</h2><div style={{display:"flex",gap:8,alignItems:"center"}}>{saved&&<span style={C.ok}>✓ Saved</span>}{saveErr&&<span style={C.err}>{saveErr}</span>}<button style={C.btnS} onClick={doBackup}>⬇ Export backup</button><label style={{...C.btnS,cursor:"pointer"}}>⬆ Import backup<input type="file" accept=".json" style={{display:"none"}} onChange={doRestore}/></label></div></div>
-  <div style={{display:"flex",borderBottom:"1px solid #ddd",margin:"10px 0"}}>{["company","factors","currency","templates"].map(t=><button key={t} style={C.tab(sub===t)} onClick={()=>setSub(t)}>{t.charAt(0).toUpperCase()+t.slice(1)}</button>)}</div>
+  <div style={{display:"flex",borderBottom:"1px solid #ddd",margin:"10px 0"}}>{["company","factors","currency","templates","usage"].map(t=><button key={t} style={C.tab(sub===t)} onClick={()=>setSub(t)}>{t.charAt(0).toUpperCase()+t.slice(1)}</button>)}</div>
   {sub==="company"&&<div style={{maxWidth:500}}>{[["name","Company name"],["address","Address"],["poBox","P.O. Box"],["city","City/ZIP"],["phone","Phone"],["mobile","Mobile"],["email","Email"]].map(([f,l])=><div key={f} style={{marginBottom:9}}><label style={C.label}>{l}</label><input style={C.input} value={S.company[f]||""} onChange={e=>set(`company.${f}`,e.target.value)}/></div>)}</div>}
   {sub==="factors"&&<div style={{maxWidth:460}}><p style={C.sT}>Default local factor</p><div style={{marginBottom:9}}><label style={C.label}>Local factor</label><input style={{...C.input,maxWidth:170}} type="number" step="0.01" value={S.defaultLocalFactor} onChange={e=>updL(e.target.value)}/></div>{warnL&&<div style={{background:"#fff7ed",border:"1px solid #fed7aa",borderRadius:"6px",padding:10,marginBottom:10}}><p style={{margin:"0 0 7px",color:"#ea580c",fontSize:13}}>⚠️ Changing global local factor. Confirm?</p><div style={{display:"flex",gap:8}}><button style={C.btnS} onClick={()=>{set("defaultLocalFactor",pendL);setWarnL(false);}}>Confirm</button><button style={C.btnS} onClick={()=>setWarnL(false)}>Cancel</button></div></div>}<p style={C.sT}>Brand factors <button style={{...C.btnS,fontSize:11,padding:"2px 7px",marginLeft:7}} onClick={syncBrands}>Sync from price list</button></p>{Object.keys(S.defaultBrandFactors).length===0&&<p style={{fontSize:13,color:"#888"}}>Import price list first, then sync.</p>}{Object.entries(S.defaultBrandFactors).map(([b,f])=><div key={b} style={{...C.row,marginBottom:7,alignItems:"center"}}><span style={{minWidth:110,fontSize:13,fontWeight:500}}>{b}</span><input style={{...C.input,maxWidth:120}} type="number" step="0.01" min="0" value={f} onChange={e=>{const s=JSON.parse(JSON.stringify(S));s.defaultBrandFactors[b]=parseFloat(e.target.value)||0;persist(s);}}/></div>)}</div>}
   {sub==="currency"&&<div style={{maxWidth:300}}><p style={C.sT}>Default currency</p><select style={C.input} value={S.defaultCurrency} onChange={e=>set("defaultCurrency",e.target.value)}>{["USD","EGP","EUR","GBP","SAR","AED"].map(c=><option key={c}>{c}</option>)}</select></div>}
+  {sub==="usage"&&<UsagePanel/>}
   {sub==="templates"&&<div><div style={{...C.row,alignItems:"center",marginBottom:10}}><select style={{...C.input,maxWidth:230}} value={tIdx} onChange={e=>setTIdx(Number(e.target.value))}>{S.templates.map((t,i)=><option key={t.id} value={i}>{t.name}{t.id===S.defaultTemplateId?" (default)":""}</option>)}</select><button style={C.btnS} onClick={()=>set("defaultTemplateId",S.templates[tIdx].id)}>Set default</button>{S.templates.length>1&&<button style={C.btnD} onClick={()=>{const s=JSON.parse(JSON.stringify(S));s.templates.splice(tIdx,1);setTIdx(0);persist(s);}}>Delete</button>}</div><div style={{...C.row,marginBottom:10}}><div style={C.f1}><label style={C.label}>Clone as</label><input style={C.input} value={newTpl} onChange={e=>setNewTpl(e.target.value)} placeholder="New template name"/></div><button style={{...C.btnS,alignSelf:"flex-end"}} onClick={()=>{if(!newTpl.trim())return;const s=JSON.parse(JSON.stringify(S));s.templates.push({id:`tpl_${Date.now()}`,name:newTpl.trim(),coverLetter:s.templates[tIdx].coverLetter,termsAndConditions:s.templates[tIdx].termsAndConditions,includeTerms:s.templates[tIdx].includeTerms!==false});setTIdx(s.templates.length-1);setNewTpl("");persist(s);}}>Clone</button></div><div style={{marginBottom:9}}><label style={C.label}>Cover letter</label><textarea style={{...C.input,minHeight:160,resize:"vertical",lineHeight:1.6}} value={S.templates[tIdx].coverLetter} onChange={e=>{const s=JSON.parse(JSON.stringify(S));s.templates[tIdx].coverLetter=e.target.value;persist(s);}}/></div><div>
     <label style={{display:"flex",alignItems:"center",gap:7,fontSize:13,fontWeight:500,cursor:"pointer",marginBottom:6}}>
       <input type="checkbox" checked={S.templates[tIdx].includeTerms!==false} onChange={e=>{const s=JSON.parse(JSON.stringify(S));s.templates[tIdx].includeTerms=e.target.checked;persist(s);}}/>
@@ -3708,11 +3739,21 @@ function ProjectsTab({user,settings}){
   // Opening the editor. takeover:true = admin takes the edit lock from whoever holds it.
   // The editor is re-mounted (editKey) with freshly loaded data whenever it is reopened.
   const [editTakeover,setEditTakeover]=useState(false),[editKey,setEditKey]=useState(0);
-  const openEditor=(proj,takeover=false)=>{setEditTakeover(!!takeover);setEditKey(k=>k+1);setEditing(proj);};
+  // The list only has summaries (v1.3.0), so the full project is loaded just before it opens.
+  const [opening,setOpening]=useState(false);
+  const openEditor=async(proj,takeover=false)=>{
+    setOpening(true);const full=await ensureFullProject(proj);setOpening(false);
+    if(!full){alert("Could not reach the server — the project could not be opened. Check your connection and try again.");return;}
+    setEditTakeover(!!takeover);setEditKey(k=>k+1);setEditing(full);
+  };
   const reopenEditor=async(takeover,projId)=>{
-    const fresh=await loadProjects();setProjects(fresh);
-    const p=fresh.find(x=>x.id===(projId||editing?.id));
+    const p=await loadProject(projId||editing?.id);
     if(p)openEditor(p,takeover);else{setEditing(null);reload();}
+  };
+  const openRevision=async(proj,revIdx)=>{
+    setOpening(true);const full=await ensureFullProject(proj);setOpening(false);
+    if(!full||!full.revisions?.[revIdx]){alert("Could not reach the server — the revision could not be opened.");return;}
+    setViewRev({project:full,revIdx});
   };
 
   const openDuplicate=proj=>{
@@ -3736,7 +3777,10 @@ function ProjectsTab({user,settings}){
     }
     setDupBusy(true);
     try{
-      const latestRev=src.draft||(src.revisions?.length?src.revisions[src.revisions.length-1]:null);
+      // the list only holds summaries (v1.3.0) — copy from the full project
+      const full=await ensureFullProject(src);
+      if(!full){setDupErr("Could not reach the server — duplicate was not created.");setDupBusy(false);return;}
+      const latestRev=full.draft||(full.revisions?.length?full.revisions[full.revisions.length-1]:null);
       const seedData=latestRev?JSON.parse(JSON.stringify(latestRev.data||latestRev)):{};
       const engineerName=!isAdminUser?(user.displayName||user.username):(src.engineerName||"");
       const np={id:uid(),projectName:dupFields.projectName.trim(),client:dupFields.client,engineerName,refNumber:dupFields.refNumber,systemType:dupFields.systemType,ownedBy:isAdminUser?null:user.username,grantedTo:[],status:"draft",createdAt:now()};
@@ -3758,9 +3802,8 @@ function ProjectsTab({user,settings}){
       if(!dr?.ok){setDupErr("Could not reach the server — duplicate was created but its content could not be saved.");setDupBusy(false);return;}
       setDupModal(null);setDupBusy(false);
       const updated=await loadProjects();
-      const newProj=updated.find(p=>p.id===cr.id)||{...np,draft:{...draftPayload,_savedBy:user.username||user.displayName,_savedAt:now()}};
       setProjects(updated);
-      openEditor(newProj);
+      await openEditor(updated.find(p=>p.id===cr.id)||{id:cr.id,summary:true});
     }catch(e){setDupErr("Something went wrong — duplicate was not created.");setDupBusy(false);}
   };
 
@@ -3846,6 +3889,7 @@ function ProjectsTab({user,settings}){
       <input style={{...C.input,maxWidth:360}} value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search by project name, client or engineer…"/>
     </div>
     {loading&&<p style={{color:"#888",fontSize:13}}>Loading…</p>}
+    {opening&&<div style={{position:"fixed",inset:0,background:"rgba(255,255,255,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400}}><span style={{...C.card,fontSize:13,color:"#555"}}>Opening project…</span></div>}
     {!loading&&visible.length===0&&<p style={{fontSize:13,color:"#888"}}>No projects yet.</p>}
     {visible.map(proj=>{
       const hasDraft=!!proj.draft,draftBy=draftOwner(proj.draft),draftAt=draftTime(proj.draft);
@@ -3866,7 +3910,7 @@ function ProjectsTab({user,settings}){
             {(proj.grantedTo||[]).length>0&&<div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:4}}>{proj.grantedTo.map(u=><span key={u} style={C.badge("blue")}>{u}{isAdminUser&&<span onClick={()=>doRevoke(proj.id,u)} style={{marginLeft:3,cursor:"pointer",fontWeight:700}}>×</span>}</span>)}</div>}
           </div>
           <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
-            {(proj.revisions?.length||0)>0&&<select style={{...C.input,maxWidth:170,fontSize:12}} onChange={e=>{if(e.target.value!=="")setViewRev({project:proj,revIdx:parseInt(e.target.value)});}} defaultValue=""><option value="">View revision…</option>{proj.revisions.map((r,i)=><option key={i} value={i}>Rev-{i}: {r.code}</option>)}</select>}
+            {(proj.revisions?.length||0)>0&&<select style={{...C.input,maxWidth:170,fontSize:12}} onChange={e=>{if(e.target.value!==""){const i=parseInt(e.target.value);e.target.value="";openRevision(proj,i);}}} defaultValue=""><option value="">View revision…</option>{proj.revisions.map((r,i)=><option key={i} value={i}>Rev-{i}: {r.code}</option>)}</select>}
             {canEdit(proj)&&<button style={C.btnS} onClick={()=>openEditor(proj)}>{lockedByOther?"View":"Edit"}</button>}
             {canEdit(proj)&&<button style={C.btnS} onClick={()=>openDuplicate(proj)}>📋 Duplicate</button>}
             {isAdminUser&&lockedByOther&&<button style={C.btnS} title="Open the editor and take the edit lock — the draft is kept" onClick={()=>{if(window.confirm(`Take over editing from ${lockBy}? Their draft is kept, but they can no longer save.`))openEditor(proj,true);}}>Take over</button>}

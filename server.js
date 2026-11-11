@@ -28,7 +28,7 @@ app.use((req, res, next) => {
 });
 // NOTE: the JSON body parser is mounted further down, *after* the auth check,
 // so unauthenticated callers can never make the server parse a 50 MB body.
-if (fs.existsSync(BUILD)) app.use(express.static(BUILD));
+// (the built website in dist/ is served further down, after the gzip handler for /assets)
 
 // ─── Database setup ───────────────────────────────────────────────────────────
 const db = new Database(DB_PATH);
@@ -144,6 +144,87 @@ ensureColumn("price_list", "children", "children TEXT NOT NULL DEFAULT '[]'");
 ensureColumn("price_list", "partNumber", "partNumber TEXT");
 ensureColumn("revisions", "gtAfterDiscount", "gtAfterDiscount TEXT");
 ensureColumn("revisions", "gtAfterDiscountEnabled", "gtAfterDiscountEnabled INTEGER NOT NULL DEFAULT 0");
+
+// ─── Indexes (v1.3.0) ─────────────────────────────────────────────────────────
+// Without these every "revisions of project X" lookup scanned the whole table.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_revisions_project ON revisions(projectId, revIndex);
+  CREATE INDEX IF NOT EXISTS idx_users_username_lc ON users(lower(username));
+`);
+
+// ─── Usage counter (v1.3.0) ───────────────────────────────────────────────────
+// Counts /api requests per day and route (with bytes sent and time taken) so we know
+// the real load before moving to Cloudflare Workers. Kept in memory, saved every minute.
+db.exec(`CREATE TABLE IF NOT EXISTS usage_daily (
+  day TEXT NOT NULL, route TEXT NOT NULL,
+  requests INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0, ms INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(day, route));`);
+const usageBuf = new Map();
+const ID_COLLECTIONS = ["projects", "pricelist", "users"];
+function routeKey(method, urlPath) {
+  const parts = urlPath.split("?")[0].split("/");           // ["", "api", "projects", "<id>", "draft"]
+  if (ID_COLLECTIONS.includes(parts[2]) && parts[3] && !["replace", "append"].includes(parts[3])) parts[3] = ":id";
+  return method + " " + parts.join("/");
+}
+function flushUsage() {
+  if (!usageBuf.size) return;
+  const up = db.prepare(`INSERT INTO usage_daily(day,route,requests,bytes,ms) VALUES(@day,@route,@requests,@bytes,@ms)
+    ON CONFLICT(day,route) DO UPDATE SET requests=requests+excluded.requests, bytes=bytes+excluded.bytes, ms=ms+excluded.ms`);
+  const rows = [...usageBuf.values()]; usageBuf.clear();
+  try { db.transaction(() => rows.forEach(r => up.run(r)))(); } catch (e) { console.error("[usage]", e.message); }
+}
+setInterval(flushUsage, 60 * 1000).unref();
+for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"]) process.on(sig, () => { flushUsage(); process.exit(0); });
+process.on("exit", flushUsage);
+app.use("/api", (req, res, next) => {
+  const t0 = Date.now();
+  res.on("finish", () => {
+    const day = new Date().toISOString().slice(0, 10);     // UTC day — the same day Cloudflare's limits use
+    const route = routeKey(req.method, req.originalUrl);
+    const k = day + "|" + route;
+    const e = usageBuf.get(k) || { day, route, requests: 0, bytes: 0, ms: 0 };
+    e.requests++; e.bytes += Number(res.getHeader("Content-Length")) || 0; e.ms += Date.now() - t0;
+    usageBuf.set(k, e);
+  });
+  next();
+});
+
+// ─── Compression (v1.3.0) ─────────────────────────────────────────────────────
+// gzip for API JSON and the built website files, using Node's own zlib (no new package).
+// Big win over the tunnel: JSON and JS shrink to roughly a fifth.
+const zlib = require("zlib");
+const acceptsGzip = req => /\bgzip\b/.test(req.headers["accept-encoding"] || "");
+app.use("/api", (req, res, next) => {
+  const json = res.json.bind(res);
+  res.json = body => {
+    const s = JSON.stringify(body);
+    if (s.length < 1024 || !acceptsGzip(req)) return json(body);
+    const gz = zlib.gzipSync(s);
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Encoding", "gzip");
+    res.setHeader("Vary", "Accept-Encoding");
+    res.setHeader("Content-Length", gz.length);
+    return res.end(gz);
+  };
+  next();
+});
+// Built JS/CSS under dist/assets have a content hash in their name, so they can be cached
+// "forever" by the browser and are gzipped once in memory.
+const gzCache = new Map();
+app.use("/assets", (req, res, next) => {
+  if (req.method !== "GET" || !acceptsGzip(req)) return next();
+  const file = path.join(BUILD, "assets", path.basename(req.path));
+  if (!/\.(js|css)$/.test(file) || !fs.existsSync(file)) return next();
+  let gz = gzCache.get(file);
+  if (!gz) { gz = zlib.gzipSync(fs.readFileSync(file), { level: 9 }); gzCache.set(file, gz); }
+  res.setHeader("Content-Type", file.endsWith(".js") ? "application/javascript; charset=utf-8" : "text/css; charset=utf-8");
+  res.setHeader("Content-Encoding", "gzip");
+  res.setHeader("Vary", "Accept-Encoding");
+  res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  res.setHeader("Content-Length", gz.length);
+  res.end(gz);
+});
+if (fs.existsSync(BUILD)) app.use(express.static(BUILD));
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const uid = () => Math.random().toString(36).slice(2,9) + Date.now().toString(36).slice(-4);
@@ -331,6 +412,20 @@ app.use(express.json({ limit: "50mb" }));
 
 app.get("/api/me", (req, res) => res.json(publicUser(req.user)));
 
+// Tiny "am I still connected?" check for the status badge (v1.3.0; it used to re-download all settings).
+app.get("/api/ping", (req, res) => res.json({ ok: true }));
+
+// Usage report for admins (v1.3.0): per UTC day, and the busiest routes, for the last 30 days.
+app.get("/api/usage", adminOnly, (req, res) => {
+  flushUsage();
+  const since = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  const days = db.prepare(`SELECT day, SUM(requests) requests, SUM(bytes) bytes, SUM(ms) ms FROM usage_daily
+    WHERE day >= ? GROUP BY day ORDER BY day DESC`).all(since);
+  const routes = db.prepare(`SELECT route, SUM(requests) requests, SUM(bytes) bytes, SUM(ms) ms FROM usage_daily
+    WHERE day >= ? GROUP BY route ORDER BY requests DESC LIMIT 25`).all(since);
+  res.json({ since, days, routes });
+});
+
 app.post("/api/me/password", (req, res) => {
   const { current, next: nw } = req.body || {};
   if (typeof current !== "string" || typeof nw !== "string") return res.status(400).json({ ok: false, error: "bad_request" });
@@ -424,7 +519,24 @@ app.delete("/api/users/:id", adminOnly, (req, res) => {
 });
 
 // ─── Price List ───────────────────────────────────────────────────────────────
+// Price-list caching (v1.3.0): the list has a version that changes on every price-list write.
+// Browsers keep their copy and only ask "still version X?" — the server answers 304 (no data)
+// unless it changed, instead of re-sending ~1,150 items every time the projects tab opens.
+let PL_VERSION = (db.prepare("SELECT value FROM auth_meta WHERE key='pricelist_version'").get() || {}).value;
+function bumpPriceListVersion() {
+  PL_VERSION = Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
+  db.prepare("INSERT INTO auth_meta(key,value) VALUES('pricelist_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(PL_VERSION);
+}
+if (!PL_VERSION) bumpPriceListVersion();
+app.use("/api/pricelist", (req, res, next) => {
+  if (req.method !== "GET") res.on("finish", () => { if (res.statusCode < 400) bumpPriceListVersion(); });
+  next();
+});
 app.get("/api/pricelist", (req, res) => {
+  const etag = `"pl-${PL_VERSION}"`;
+  res.setHeader("Cache-Control", "private, no-cache");   // keep a copy, but always check the version
+  res.setHeader("ETag", etag);
+  if (req.headers["if-none-match"] === etag) return res.status(304).end();
   const rows = db.prepare("SELECT * FROM price_list ORDER BY sortOrder ASC").all();
   res.json(rows.map(hydratePLItem));
 });
@@ -495,10 +607,28 @@ function projectOr404(req, res) {
   return row;
 }
 
+// Projects list (v1.3.0): a short summary per project — revision codes and the draft's
+// owner/time only, never the revision contents (that used to be ~7 MB per load).
+// The full project comes from GET /api/projects/:id when it is opened.
 app.get("/api/projects", (req, res) => {
   const rows = db.prepare("SELECT * FROM projects ORDER BY createdAt DESC").all()
     .filter(r => canAccessProject(req.user, r));
-  res.json(rows.map(hydrateProject));
+  const ids = new Set(rows.map(r => r.id));
+  const revs = {}, drafts = {}, locks = {};
+  for (const r of db.prepare("SELECT id, projectId, revIndex, code, createdAt FROM revisions ORDER BY projectId, revIndex").all())
+    if (ids.has(r.projectId)) (revs[r.projectId] = revs[r.projectId] || []).push({ id: r.id, revIndex: r.revIndex, code: r.code, createdAt: r.createdAt });
+  for (const d of db.prepare("SELECT projectId, savedBy, savedAt FROM drafts").all()) drafts[d.projectId] = { savedBy: d.savedBy, savedAt: d.savedAt };
+  for (const l of db.prepare("SELECT * FROM edit_locks").all()) if (!isStale(l)) locks[l.projectId] = { username: l.username, since: l.since };
+  res.json(rows.map(r => ({
+    ...r, grantedTo: p(r.grantedTo) || [], summary: true,
+    revisions: revs[r.id] || [], draft: drafts[r.id] || null, lock: locks[r.id] || null,
+  })));
+});
+
+// One project with everything (all revisions + draft contents) — used when it is opened.
+app.get("/api/projects/:id", (req, res) => {
+  const row = projectOr404(req, res); if (!row) return;
+  res.json(hydrateProject(row));
 });
 
 app.post("/api/projects", (req, res) => {
@@ -770,6 +900,7 @@ app.post("/api/backup/restore", superOnly, (req, res) => {
   });
 
   restoreTx();
+  bumpPriceListVersion(); // restored price list → browsers must reload it
   res.json({ ok: true });
 });
 
