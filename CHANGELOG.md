@@ -4,6 +4,21 @@ Each released version's source code is kept in `versions\v<version>\`.
 To make a new version: `.\release.ps1 1.2.0` (in PowerShell, in the MSCC folder), then run `start.bat`.
 Numbering: PATCH 1.1.x = bug fix · MINOR 1.x.0 = new feature · MAJOR x.0.0 = data/format change.
 
+## v1.4.0 - 2026-11-15
+Phase 2 of the Cloudflare Workers plan: a Workers + D1 version of the server, tested locally on a copy of the
+real data. The PC version keeps running as before — see `worker/README.md` for the switch-over (phase 3).
+- **New `worker/` project**: every `/api` route ported to Cloudflare Workers + D1 (same website, same JSON,
+  same roles, edit locks and price-list caching), plus scripts to export the PC database and import it into D1.
+- **Passwords are upgraded on sign-in** (scrypt → PBKDF2, the format the Workers version can check within its
+  CPU budget). User Management shows **needs sign-in** next to users not yet upgraded.
+- **Backup / restore now go in pages** (table by table) on both versions. The backup file format is unchanged,
+  old backup files still restore, and a restore now asks for confirmation first and shows progress.
+- Fixed: **deleting a project left its revisions and draft behind** — the tables made by the old `migrate.js`
+  had no link to `projects`, so "cascade" never ran. Deletes now remove them explicitly. (40 revisions and 17
+  drafts of earlier-deleted projects are still in the PC database; they are invisible in the app and are not
+  copied to Cloudflare.)
+- Settings → Usage shows where usage is on Cloudflare when running there.
+
 ## v1.3.0 - 2026-11-11
 Phase 1 of the Cloudflare Workers plan: make the app light enough for the free tier — and faster today.
 - **Projects list is a short summary**: revision codes and the draft owner only. A project's full contents

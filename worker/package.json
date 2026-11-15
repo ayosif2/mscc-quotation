@@ -1,0 +1,21 @@
+{
+  "name": "mscc-quotation-worker",
+  "version": "1.4.0",
+  "private": true,
+  "description": "MSCC Quotation System on Cloudflare Workers + D1 (same website as the PC version, API ported from server.js)",
+  "scripts": {
+    "build:site": "cd .. && npm run build",
+    "db:init:local": "wrangler d1 migrations apply DB --local",
+    "db:export": "node scripts/export-d1.cjs ../mscc_data.db data/import",
+    "db:import:local": "node scripts/import-d1.cjs --local",
+    "db:import:remote": "node scripts/import-d1.cjs --remote",
+    "dev": "wrangler dev --port 8787",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "hono": "4.13.14"
+  },
+  "devDependencies": {
+    "wrangler": "4.156.0"
+  }
+}

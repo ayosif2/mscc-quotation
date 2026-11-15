@@ -22,6 +22,10 @@ On the very first start the server creates a superadmin account and writes its p
 
 Development: `npm run server` (backend) and `npm run dev` (frontend with hot reload).
 
+## Cloudflare Workers version
+
+[`worker/`](worker/) runs the same app on Cloudflare Workers + D1 (free plan). See [worker/README.md](worker/README.md).
+
 ## Data
 
 The database (`mscc_data.db`) is created next to `server.js` and is **not** part of this repository.

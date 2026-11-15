@@ -2051,7 +2051,7 @@ function Login({onLogin}){
       const d=await r.json().catch(()=>({}));
       setLoading(false);
       if(r.status===429){setErr("Too many failed attempts. Try again in 15 minutes.");return;}
-      if(r.status===403&&d.error==="disabled"){setErr("Account disabled.");return;}
+      if(r.status===403&&d.error==="disabled"){setErr("Account disabled.");return;}if(r.status===403&&d.error==="password_upgrade"){setErr("Your password needs to be reset by an admin before you can sign in here.");return;}
       if(!r.ok||!d.token){setErr("Invalid credentials.");return;}
       const sess={...d.user,token:d.token};
       LS.set("mscc_session",sess);onLogin(sess);
@@ -2129,7 +2129,7 @@ function UsagePanel(){
   const avg=(ms,n)=>n?Math.round(ms/n)+" ms":"—";
   const pct=n=>((n/100000)*100).toFixed(1)+"%";
   return(<div>
-    <p style={{fontSize:12,color:"#666",margin:"0 0 10px"}}>Requests to the server per day (UTC), counted since v1.3.0. For comparison, Cloudflare Workers' free plan allows 100,000 requests per day.</p>
+    {u.note&&<p style={{fontSize:13,color:"#1d4ed8",margin:"0 0 10px"}}>{u.note}</p>}<p style={{fontSize:12,color:"#666",margin:"0 0 10px"}}>Requests to the server per day (UTC), counted since v1.3.0. For comparison, Cloudflare Workers' free plan allows 100,000 requests per day.</p>
     {u.days.length===0&&<p style={{fontSize:13,color:"#888"}}>Nothing recorded yet.</p>}
     {u.days.length>0&&<table style={{width:"100%",maxWidth:640,borderCollapse:"collapse",fontSize:13,marginBottom:16}}>
       <thead style={{background:"#f4f4f4"}}><tr><th style={C.th}>Day (UTC)</th><th style={{...C.th,textAlign:"right"}}>Requests</th><th style={{...C.th,textAlign:"right"}}>Of free limit</th><th style={{...C.th,textAlign:"right"}}>Data sent</th><th style={{...C.th,textAlign:"right"}}>Avg time</th></tr></thead>
@@ -2145,15 +2145,55 @@ function UsagePanel(){
 
 function SettingsTab({onSaved}){
   const [S,setS]=useState(null),[saved,setSaved]=useState(false),[saveErr,setSaveErr]=useState(""),[tIdx,setTIdx]=useState(0),[newTpl,setNewTpl]=useState(""),[warnL,setWarnL]=useState(false),[pendL,setPendL]=useState(null),[sub,setSub]=useState("company");
+  const [bkBusy,setBkBusy]=useState(""); // backup/restore progress text (hooks must come before the early return below)
   useEffect(()=>{loadSettings().then(setS);},[]);
   if(!S)return<p style={{padding:20,color:"#888"}}>Loading…</p>;
   const persist=async s=>{setS(s);const r=await saveSettings(s);if(r.ok){setSaveErr("");setSaved(true);setTimeout(()=>setSaved(false),2000);if(onSaved)onSaved();}else{setSaveErr("Save failed — check your connection to the server and try again.");setTimeout(()=>setSaveErr(""),4000);}};
   const set=(path,val)=>{const s=JSON.parse(JSON.stringify(S));const ks=path.split(".");let o=s;ks.slice(0,-1).forEach(k=>o=o[k]);o[ks[ks.length-1]]=val;persist(s);};
   const updL=val=>{const n=parseFloat(val);if(!isNaN(n)&&n!==1&&S.defaultLocalFactor===1&&!warnL){setPendL(n);setWarnL(true);return;}set("defaultLocalFactor",isNaN(n)?1:n);};
   const syncBrands=async()=>{const pl=await loadPriceList();const brands=[...new Set(pl.map(i=>i.brand).filter(Boolean))];const s=JSON.parse(JSON.stringify(S));brands.forEach(b=>{if(!s.defaultBrandFactors[b])s.defaultBrandFactors[b]=1;});persist(s);};
-  const doBackup=async()=>{if(!API){alert("Backup requires the local server.");return;}try{const r=await fetch(`${API}/backup`,{headers:authHeaders()});setConnStatus("online");if(r.status===401){forceLogout();return;}if(r.status===403){alert("Only admins can download backups.");return;}if(!r.ok)throw new Error("bad status");const blob=await r.blob();const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`mscc_backup_${new Date().toISOString().slice(0,10)}.json`;a.click();}catch{setConnStatus("offline");alert("Could not reach the server — backup was not downloaded. Check your connection and try again.");}};
-  const doRestore=async e=>{const f=e.target.files[0];if(!f)return;const text=await f.text();try{const data=JSON.parse(text);if(!API){alert("Restore requires the local server.");return;}const r=await apiCall("/backup/restore",{method:"POST",body:JSON.stringify(data)});if(!r.ok){alert(r.status===403?"Only the superadmin can restore a backup.":"Could not reach the server — restore did not complete. Check your connection and try again.");return;}alert("Restore complete. Reload the page.");}catch{alert("Invalid backup file.");}e.target.value="";};
-  return(<div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><h2 style={{margin:0,fontSize:15,fontWeight:600}}>Global Settings</h2><div style={{display:"flex",gap:8,alignItems:"center"}}>{saved&&<span style={C.ok}>✓ Saved</span>}{saveErr&&<span style={C.err}>{saveErr}</span>}<button style={C.btnS} onClick={doBackup}>⬇ Export backup</button><label style={{...C.btnS,cursor:"pointer"}}>⬆ Import backup<input type="file" accept=".json" style={{display:"none"}} onChange={doRestore}/></label></div></div>
+  // Backup / restore in chunks (v1.4.0): table by table, page by page, so it also works on Cloudflare
+  // Workers where one request can't carry the whole database. The .json file format is unchanged.
+  const doBackup=async()=>{
+    if(!API){alert("Backup requires the local server.");return;}
+    setBkBusy("Preparing backup…");
+    try{
+      const out={exportedAt:new Date().toISOString(),settings:{},users:[],priceList:[],projects:[],revisions:[],drafts:[]};
+      for(const table of ["settings","users","priceList","projects","revisions","drafts"]){
+        let offset=0;
+        while(offset!==null){
+          setBkBusy(`Downloading ${table}… ${offset||""}`);
+          const r=await apiCall(`/backup/part?table=${table}&offset=${offset}`);
+          if(!r.ok){alert(r.status===403?"Only admins can download backups.":"Could not reach the server — backup was not downloaded. Check your connection and try again.");return;}
+          if(table==="settings")r.data.rows.forEach(x=>{out.settings[x.key]=x.value;});else out[table].push(...r.data.rows);
+          offset=r.data.next;
+        }
+      }
+      const blob=new Blob([JSON.stringify(out)],{type:"application/json"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`mscc_backup_${new Date().toISOString().slice(0,10)}.json`;a.click();
+    }finally{setBkBusy("");}
+  };
+  const doRestore=async e=>{
+    const f=e.target.files[0];if(!f)return;e.target.value="";
+    let data;try{data=JSON.parse(await f.text());}catch{alert("Invalid backup file.");return;}
+    if(!API){alert("Restore requires the local server.");return;}
+    if(!window.confirm("Restore this backup?\n\nThis REPLACES everything — all projects, revisions, drafts, the price list, users and settings — with the contents of the file. It cannot be undone. Download a backup of the current data first if you might need it."))return;
+    const fail=st=>{alert(st===403?"Only the superadmin can restore a backup.":"The restore stopped part-way (connection problem). Run the restore again with the same file.");};
+    setBkBusy("Restoring settings and users…");
+    try{
+      let r=await apiCall("/backup/restore/start",{method:"POST",body:JSON.stringify({settings:data.settings||{},users:data.users||[]})});
+      if(!r.ok){fail(r.status);return;}
+      for(const [table,size] of [["priceList",300],["projects",300],["revisions",40],["drafts",40]]){
+        const rows=data[table]||[];
+        for(let i=0;i<rows.length;i+=size){
+          setBkBusy(`Restoring ${table}… ${Math.min(i+size,rows.length)} / ${rows.length}`);
+          r=await apiCall("/backup/restore/rows",{method:"POST",body:JSON.stringify({table,rows:rows.slice(i,i+size)})});
+          if(!r.ok){fail(r.status);return;}
+        }
+      }
+      alert("Restore complete. Reload the page.");
+    }finally{setBkBusy("");}
+  };
+  return(<div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><h2 style={{margin:0,fontSize:15,fontWeight:600}}>Global Settings</h2><div style={{display:"flex",gap:8,alignItems:"center"}}>{saved&&<span style={C.ok}>✓ Saved</span>}{saveErr&&<span style={C.err}>{saveErr}</span>}{bkBusy&&<span style={{fontSize:12,color:"#ea580c"}}>{bkBusy}</span>}<button style={C.btnS} onClick={doBackup} disabled={!!bkBusy}>⬇ Export backup</button><label style={{...C.btnS,cursor:"pointer"}}>⬆ Import backup<input type="file" accept=".json" style={{display:"none"}} onChange={doRestore}/></label></div></div>
   <div style={{display:"flex",borderBottom:"1px solid #ddd",margin:"10px 0"}}>{["company","factors","currency","templates","usage"].map(t=><button key={t} style={C.tab(sub===t)} onClick={()=>setSub(t)}>{t.charAt(0).toUpperCase()+t.slice(1)}</button>)}</div>
   {sub==="company"&&<div style={{maxWidth:500}}>{[["name","Company name"],["address","Address"],["poBox","P.O. Box"],["city","City/ZIP"],["phone","Phone"],["mobile","Mobile"],["email","Email"]].map(([f,l])=><div key={f} style={{marginBottom:9}}><label style={C.label}>{l}</label><input style={C.input} value={S.company[f]||""} onChange={e=>set(`company.${f}`,e.target.value)}/></div>)}</div>}
   {sub==="factors"&&<div style={{maxWidth:460}}><p style={C.sT}>Default local factor</p><div style={{marginBottom:9}}><label style={C.label}>Local factor</label><input style={{...C.input,maxWidth:170}} type="number" step="0.01" value={S.defaultLocalFactor} onChange={e=>updL(e.target.value)}/></div>{warnL&&<div style={{background:"#fff7ed",border:"1px solid #fed7aa",borderRadius:"6px",padding:10,marginBottom:10}}><p style={{margin:"0 0 7px",color:"#ea580c",fontSize:13}}>⚠️ Changing global local factor. Confirm?</p><div style={{display:"flex",gap:8}}><button style={C.btnS} onClick={()=>{set("defaultLocalFactor",pendL);setWarnL(false);}}>Confirm</button><button style={C.btnS} onClick={()=>setWarnL(false)}>Cancel</button></div></div>}<p style={C.sT}>Brand factors <button style={{...C.btnS,fontSize:11,padding:"2px 7px",marginLeft:7}} onClick={syncBrands}>Sync from price list</button></p>{Object.keys(S.defaultBrandFactors).length===0&&<p style={{fontSize:13,color:"#888"}}>Import price list first, then sync.</p>}{Object.entries(S.defaultBrandFactors).map(([b,f])=><div key={b} style={{...C.row,marginBottom:7,alignItems:"center"}}><span style={{minWidth:110,fontSize:13,fontWeight:500}}>{b}</span><input style={{...C.input,maxWidth:120}} type="number" step="0.01" min="0" value={f} onChange={e=>{const s=JSON.parse(JSON.stringify(S));s.defaultBrandFactors[b]=parseFloat(e.target.value)||0;persist(s);}}/></div>)}</div>}
@@ -2218,7 +2258,7 @@ function UserMgmtTab({user}){
       </div>):(<div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
         <div>
           <p style={{margin:0,fontWeight:500,fontSize:13}}>{u.displayName}</p>
-          <p style={{margin:"2px 0 0",fontSize:12,color:"#666"}}>@{u.username} · <span style={C.badge("orange")}>admin</span> · <span style={C.badge(u.active?"green":"red")}>{u.active?"active":"disabled"}</span></p>
+          <p style={{margin:"2px 0 0",fontSize:12,color:"#666"}}>@{u.username} · <span style={C.badge("orange")}>admin</span> · <span style={C.badge(u.active?"green":"red")}>{u.active?"active":"disabled"}</span>{u.passwordReady===false&&<> · <span style={C.badge("orange")} title="This user has not signed in since v1.4.0, so their password is still in the old format. It must be upgraded (sign in once, or an admin sets a new password) before the move to Cloudflare.">needs sign-in</span></>}</p>
         </div>
         <div style={{display:"flex",gap:7}}>
           <button style={C.btnS} onClick={()=>setRid(u.id)}>Reset pw</button>
@@ -2263,7 +2303,7 @@ function UserMgmtTab({user}){
       </div>):(<div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
         <div>
           <p style={{margin:0,fontWeight:500,fontSize:13}}>{u.displayName}</p>
-          <p style={{margin:"2px 0 0",fontSize:12,color:"#666"}}>@{u.username} · <span style={C.badge(u.active?"green":"red")}>{u.active?"active":"disabled"}</span></p>
+          <p style={{margin:"2px 0 0",fontSize:12,color:"#666"}}>@{u.username} · <span style={C.badge(u.active?"green":"red")}>{u.active?"active":"disabled"}</span>{u.passwordReady===false&&<> · <span style={C.badge("orange")} title="This user has not signed in since v1.4.0, so their password is still in the old format. It must be upgraded (sign in once, or an admin sets a new password) before the move to Cloudflare.">needs sign-in</span></>}</p>
         </div>
         <div style={{display:"flex",gap:7}}>
           <button style={C.btnS} onClick={()=>setRid(u.id)}>Reset pw</button>

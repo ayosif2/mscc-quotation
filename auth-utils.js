@@ -2,21 +2,36 @@
 // Uses only Node's built-in crypto — no extra npm packages needed.
 const crypto = require("crypto");
 
-const HASH_RE = /^scrypt\$[0-9a-f]{32}\$[0-9a-f]{128}$/;
+// Two stored formats:
+//   pbkdf2$<rounds>$<salt hex>$<hash hex>  — current (v1.4.0). Cloudflare Workers can check it cheaply
+//                                            (Web Crypto), so it is the only format the Worker accepts.
+//   scrypt$<salt hex>$<hash hex>           — older. Still accepted here; upgraded to pbkdf2 on sign-in.
+const SCRYPT_RE = /^scrypt\$[0-9a-f]{32}\$[0-9a-f]{128}$/;
+const PBKDF2_RE = /^pbkdf2\$\d{4,7}\$[0-9a-f]{32}\$[0-9a-f]{64}$/;
+const PBKDF2_ROUNDS = 30000; // keep in sync with worker/src/auth.js — sized for the Workers 10 ms CPU budget
 const MIN_PASSWORD = 8;
 
 function hashPassword(pw) {
   const salt = crypto.randomBytes(16);
-  const h = crypto.scryptSync(String(pw), salt, 64);
-  return `scrypt$${salt.toString("hex")}$${h.toString("hex")}`;
+  const h = crypto.pbkdf2Sync(String(pw), salt, PBKDF2_ROUNDS, 32, "sha256");
+  return `pbkdf2$${PBKDF2_ROUNDS}$${salt.toString("hex")}$${h.toString("hex")}`;
 }
-const isHashed = s => typeof s === "string" && HASH_RE.test(s);
+const isHashed = s => typeof s === "string" && (PBKDF2_RE.test(s) || SCRYPT_RE.test(s));
+const needsRehash = s => !(typeof s === "string" && PBKDF2_RE.test(s) && Number(s.split("$")[1]) === PBKDF2_ROUNDS);
 
 function verifyPassword(pw, stored) {
-  if (!isHashed(stored)) return false;
-  const [, salt, hash] = stored.split("$");
-  const h = crypto.scryptSync(String(pw), Buffer.from(salt, "hex"), 64);
-  return crypto.timingSafeEqual(h, Buffer.from(hash, "hex"));
+  if (typeof stored !== "string") return false;
+  if (PBKDF2_RE.test(stored)) {
+    const [, rounds, salt, hash] = stored.split("$");
+    const h = crypto.pbkdf2Sync(String(pw), Buffer.from(salt, "hex"), Number(rounds), 32, "sha256");
+    return crypto.timingSafeEqual(h, Buffer.from(hash, "hex"));
+  }
+  if (SCRYPT_RE.test(stored)) {
+    const [, salt, hash] = stored.split("$");
+    const h = crypto.scryptSync(String(pw), Buffer.from(salt, "hex"), 64);
+    return crypto.timingSafeEqual(h, Buffer.from(hash, "hex"));
+  }
+  return false;
 }
 
 // Token = base64url(payload) + "." + HMAC-SHA256(payload).
@@ -44,4 +59,4 @@ function verifyToken(token, secret) {
   } catch { return null; }
 }
 
-module.exports = { MIN_PASSWORD, hashPassword, verifyPassword, isHashed, signToken, verifyToken };
+module.exports = { MIN_PASSWORD, hashPassword, verifyPassword, isHashed, needsRehash, signToken, verifyToken };

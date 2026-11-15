@@ -9,7 +9,7 @@ const os       = require("os");
 const fs       = require("fs");
 const crypto   = require("crypto");
 const Database = require("better-sqlite3");
-const { MIN_PASSWORD, hashPassword, verifyPassword, isHashed, signToken, verifyToken } = require("./auth-utils");
+const { MIN_PASSWORD, hashPassword, verifyPassword, isHashed, needsRehash, signToken, verifyToken } = require("./auth-utils");
 
 const app      = express();
 const PORT     = process.env.PORT || 3001;
@@ -368,7 +368,8 @@ const TOKEN_SECRET = (() => {
 const lc = s => String(s || "").toLowerCase();
 const isAdmin = u => u && (u.role === "admin" || u.role === "superadmin");
 const isSuper = u => u && u.role === "superadmin";
-const publicUser = u => ({ id: u.id, username: u.username, displayName: u.displayName, role: u.role, active: !!u.active, createdAt: u.createdAt });
+const publicUser = u => ({ id: u.id, username: u.username, displayName: u.displayName, role: u.role, active: !!u.active, createdAt: u.createdAt,
+  passwordReady: !needsRehash(u.password) }); // false = still the old hash: must sign in once before the move to Workers
 const ah = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next); // async handler wrapper
 
 // Brute-force protection: failures are counted per (ip + username) and per username.
@@ -392,6 +393,12 @@ app.post("/api/login", express.json({ limit: "10kb" }), (req, res) => {
   if (!good) { addFail(k1); addFail(k2); return res.status(401).json({ ok: false, error: "invalid" }); }
   if (!u.active) return res.status(403).json({ ok: false, error: "disabled" });
   FAILS.delete(k1);
+  // v1.4.0: upgrade older (scrypt) hashes to pbkdf2 now that we know the password — the Cloudflare
+  // Workers version only accepts pbkdf2, so everyone who signs in here once is ready for the move.
+  if (needsRehash(u.password)) {
+    u.password = hashPassword(password);
+    db.prepare("UPDATE users SET password=? WHERE id=?").run(u.password, u.id);
+  }
   res.json({ ok: true, token: signToken(u, TOKEN_SECRET, TOKEN_TTL), user: publicUser(u) });
 });
 
@@ -687,7 +694,15 @@ app.put("/api/projects/:id", (req, res) => {
 });
 
 app.delete("/api/projects/:id", adminOnly, (req, res) => {
-  db.prepare("DELETE FROM projects WHERE id=?").run(req.params.id);
+  // Children first, explicitly: the revisions/drafts tables in databases created by the old migrate.js
+  // have no foreign-key link to projects, so "ON DELETE CASCADE" never ran and deleted projects
+  // left their revisions and drafts behind (v1.4.0 fix).
+  db.transaction(id => {
+    db.prepare("DELETE FROM drafts WHERE projectId=?").run(id);
+    db.prepare("DELETE FROM revisions WHERE projectId=?").run(id);
+    db.prepare("DELETE FROM edit_locks WHERE projectId=?").run(id);
+    db.prepare("DELETE FROM projects WHERE id=?").run(id);
+  })(req.params.id);
   res.json({ ok: true });
 });
 
@@ -815,93 +830,125 @@ app.get("/api/backup", adminOnly, (req, res) => {
   res.json(backup);
 });
 
+// Restore helpers — used by the one-shot restore below and by the chunked restore (v1.4.0).
+function restoreBegin(settings, users, actor) {   // wipes everything, then settings + users
+  db.prepare("DELETE FROM edit_locks").run();
+  db.prepare("DELETE FROM drafts").run();
+  db.prepare("DELETE FROM revisions").run();
+  db.prepare("DELETE FROM projects").run();
+  db.prepare("DELETE FROM price_list").run();
+  db.prepare("DELETE FROM users").run();
+  db.prepare("DELETE FROM settings").run();
+
+  const upsertSetting = db.prepare(
+    "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+  );
+  for (const [k, v] of Object.entries(settings || {})) upsertSetting.run(k, j(v));
+
+  const insUser = db.prepare(`
+    INSERT OR IGNORE INTO users(id,username,displayName,password,role,active,createdAt)
+    VALUES(@id,@username,@displayName,@password,@role,@active,@createdAt)
+  `);
+  for (const u of (users || [])) {
+    if (!u || !u.username) continue;
+    insUser.run({
+      id: u.id || uid(), username: u.username, createdAt: u.createdAt || now(),
+      displayName: u.displayName || "",
+      // old backups hold plain-text passwords → hash them on the way in
+      password: isHashed(u.password) ? u.password : hashPassword(u.password || crypto.randomBytes(12).toString("hex")),
+      role: ["presales", "admin", "superadmin"].includes(u.role) ? u.role : "presales",
+      active: u.active ? 1 : 0,
+    });
+  }
+  if (!db.prepare("SELECT 1 FROM users WHERE lower(username)=lower(?)").get(actor.username))
+    insUser.run({ id: actor.id, username: actor.username, displayName: actor.displayName || "", password: actor.password,
+                  role: actor.role, active: 1, createdAt: actor.createdAt });
+}
+
+const REV_COLS = ["id","projectId","revIndex","projectName","client","engineerName","salesEngineer","contactName","contactPhone",
+  "contactEmail","refNumber","systemType","date","currency","conversionRate","brandFactors","localFactor","lines","tcEnabled",
+  "tcMode","tcValue","tcPercent","tcApprox","tcBaseUSD","installEnabled","installValue","extras","notes","roundUp","code",
+  "grandTotal","gtAfterDiscount","gtAfterDiscountEnabled","createdAt"];
+function restoreRows(table, rows) {               // one table's rows (INSERT OR IGNORE)
+  rows = Array.isArray(rows) ? rows : [];
+  if (table === "priceList") {
+    const ins = db.prepare(`INSERT OR IGNORE INTO price_list(id,type,description,modelNo,brand,glp,local,notes,children,partNumber,sortOrder)
+      VALUES(@id,@type,@description,@modelNo,@brand,@glp,@local,@notes,@children,@partNumber,@sortOrder)`);
+    rows.forEach((item, i) => ins.run(normalizePLItem(item, item.sortOrder ?? i)));
+  } else if (table === "projects") {
+    const ins = db.prepare(`INSERT OR IGNORE INTO projects(id,projectName,client,engineerName,refNumber,systemType,ownedBy,grantedTo,status,createdAt,updatedAt)
+      VALUES(@id,@projectName,@client,@engineerName,@refNumber,@systemType,@ownedBy,@grantedTo,@status,@createdAt,@updatedAt)`);
+    for (const pr of rows) ins.run({ projectName: null, client: null, engineerName: null, refNumber: null, systemType: null, ownedBy: null,
+      ...pr, status: pr.status || "draft", grantedTo: j(pr.grantedTo || []), createdAt: pr.createdAt || now(), updatedAt: pr.updatedAt || now() });
+  } else if (table === "revisions") {
+    const ins = db.prepare(`INSERT OR IGNORE INTO revisions(${REV_COLS.join(",")}) VALUES(${REV_COLS.map(c => "@" + c).join(",")})`);
+    for (const r of rows) {
+      const rec = {};
+      for (const c of REV_COLS) rec[c] = r[c] ?? null;
+      Object.assign(rec, {
+        brandFactors: j(r.brandFactors ?? {}), lines: j(r.lines ?? []), extras: j(r.extras ?? []),
+        tcEnabled: r.tcEnabled ? 1 : 0, installEnabled: r.installEnabled ? 1 : 0, roundUp: r.roundUp ? 1 : 0,
+        gtAfterDiscountEnabled: r.gtAfterDiscountEnabled ? 1 : 0, createdAt: r.createdAt || now(),
+      });
+      ins.run(rec);
+    }
+  } else if (table === "drafts") {
+    const ins = db.prepare("INSERT OR IGNORE INTO drafts(projectId,data,savedBy,savedAt) VALUES(?,?,?,?)");
+    for (const d of rows) ins.run(d.projectId, j(d.data), d.savedBy || null, d.savedAt || now());
+  } else {
+    const e = new Error("bad table"); e.status = 400; throw e;
+  }
+}
+
+// One-shot restore (older clients). The app itself uses the chunked restore below since v1.4.0.
 app.post("/api/backup/restore", superOnly, (req, res) => {
   const { settings, users, priceList, projects, revisions, drafts } = req.body || {};
-  const actor = req.user; // the superadmin doing the restore — kept even if the backup does not contain them
-
-  const restoreTx = db.transaction(() => {
-    db.prepare("DELETE FROM drafts").run();
-    db.prepare("DELETE FROM revisions").run();
-    db.prepare("DELETE FROM projects").run();
-    db.prepare("DELETE FROM price_list").run();
-    db.prepare("DELETE FROM users").run();
-    db.prepare("DELETE FROM settings").run();
-
-    const upsertSetting = db.prepare(
-      "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
-    );
-    for (const [k, v] of Object.entries(settings || {})) upsertSetting.run(k, j(v));
-
-    const insUser = db.prepare(`
-      INSERT OR IGNORE INTO users(id,username,displayName,password,role,active,createdAt)
-      VALUES(@id,@username,@displayName,@password,@role,@active,@createdAt)
-    `);
-    for (const u of (users || [])) {
-      if (!u || !u.username) continue;
-      insUser.run({
-        id: u.id || uid(), username: u.username, createdAt: u.createdAt || now(),
-        displayName: u.displayName || "",
-        // old backups hold plain-text passwords → hash them on the way in
-        password: isHashed(u.password) ? u.password : hashPassword(u.password || crypto.randomBytes(12).toString("hex")),
-        role: ["presales", "admin", "superadmin"].includes(u.role) ? u.role : "presales",
-        active: u.active ? 1 : 0,
-      });
-    }
-    if (!db.prepare("SELECT 1 FROM users WHERE lower(username)=lower(?)").get(actor.username))
-      insUser.run({ id: actor.id, username: actor.username, displayName: actor.displayName || "", password: actor.password,
-                    role: actor.role, active: 1, createdAt: actor.createdAt });
-
-    const insPL = db.prepare(`
-      INSERT OR IGNORE INTO price_list(id,type,description,modelNo,brand,glp,local,notes,children,partNumber,sortOrder)
-      VALUES(@id,@type,@description,@modelNo,@brand,@glp,@local,@notes,@children,@partNumber,@sortOrder)
-    `);
-    (priceList || []).forEach((item, i) => insPL.run(normalizePLItem(item, item.sortOrder ?? i)));
-
-    const insProj = db.prepare(`
-      INSERT OR IGNORE INTO projects(id,projectName,client,engineerName,refNumber,systemType,ownedBy,grantedTo,status,createdAt,updatedAt)
-      VALUES(@id,@projectName,@client,@engineerName,@refNumber,@systemType,@ownedBy,@grantedTo,@status,@createdAt,@updatedAt)
-    `);
-    for (const pr of (projects || []))
-      insProj.run({ ...pr, status: pr.status || "draft", grantedTo: j(pr.grantedTo || []), updatedAt: pr.updatedAt || now() });
-
-    const insRev = db.prepare(`
-      INSERT OR IGNORE INTO revisions(
-        id,projectId,revIndex,projectName,client,engineerName,salesEngineer,
-        contactName,contactPhone,contactEmail,refNumber,systemType,date,currency,
-        conversionRate,brandFactors,localFactor,lines,tcEnabled,tcMode,tcValue,
-        tcPercent,tcApprox,tcBaseUSD,installEnabled,installValue,extras,notes,
-        roundUp,code,grandTotal,gtAfterDiscount,gtAfterDiscountEnabled,createdAt
-      ) VALUES(
-        @id,@projectId,@revIndex,@projectName,@client,@engineerName,@salesEngineer,
-        @contactName,@contactPhone,@contactEmail,@refNumber,@systemType,@date,@currency,
-        @conversionRate,@brandFactors,@localFactor,@lines,@tcEnabled,@tcMode,@tcValue,
-        @tcPercent,@tcApprox,@tcBaseUSD,@installEnabled,@installValue,@extras,@notes,
-        @roundUp,@code,@grandTotal,@gtAfterDiscount,@gtAfterDiscountEnabled,@createdAt
-      )
-    `);
-    for (const r of (revisions || []))
-      insRev.run({
-        ...r,
-        brandFactors:   j(r.brandFactors  ?? {}),
-        lines:          j(r.lines         ?? []),
-        extras:         j(r.extras        ?? []),
-        tcEnabled:      r.tcEnabled      ? 1 : 0,
-        installEnabled: r.installEnabled ? 1 : 0,
-        roundUp:        r.roundUp        ? 1 : 0,
-        gtAfterDiscountEnabled: r.gtAfterDiscountEnabled ? 1 : 0,
-        createdAt:      r.createdAt      || now(),
-      });
-
-    const insDraft = db.prepare(`
-      INSERT OR IGNORE INTO drafts(projectId,data,savedBy,savedAt) VALUES(?,?,?,?)
-    `);
-    for (const d of (drafts || []))
-      insDraft.run(d.projectId, j(d.data), d.savedBy || null, d.savedAt || now());
-  });
-
-  restoreTx();
+  db.transaction(() => {
+    restoreBegin(settings, users, req.user);
+    restoreRows("priceList", priceList); restoreRows("projects", projects);
+    restoreRows("revisions", revisions); restoreRows("drafts", drafts);
+  })();
   bumpPriceListVersion(); // restored price list → browsers must reload it
   res.json({ ok: true });
+});
+
+// ─── Chunked backup / restore (v1.4.0) ────────────────────────────────────────
+// The browser downloads the backup table by table in pages and builds the same .json file
+// as before; a restore is sent the same way. Same API as the Cloudflare Workers version,
+// where one request can't handle the whole database.
+const BACKUP_PAGE = { settings: 1000, users: 1000, priceList: 500, projects: 500, revisions: 100, drafts: 100 };
+app.get("/api/backup/part", adminOnly, (req, res) => {
+  const table = String(req.query.table || ""), offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  const limit = BACKUP_PAGE[table];
+  if (!limit) return res.status(400).json({ ok: false, error: "bad_table" });
+  let rows;
+  if (table === "settings") {
+    rows = db.prepare("SELECT key, value FROM settings ORDER BY key LIMIT ? OFFSET ?").all(limit, offset).map(r => ({ key: r.key, value: p(r.value) }));
+  } else if (table === "users") {
+    rows = db.prepare("SELECT * FROM users ORDER BY id LIMIT ? OFFSET ?").all(limit, offset).map(u => ({ ...u, active: !!u.active }));
+  } else if (table === "priceList") {
+    rows = db.prepare("SELECT * FROM price_list ORDER BY sortOrder ASC, id LIMIT ? OFFSET ?").all(limit, offset).map(hydratePLItem);
+  } else if (table === "projects") {
+    rows = db.prepare("SELECT * FROM projects ORDER BY createdAt DESC, id LIMIT ? OFFSET ?").all(limit, offset).map(r => ({ ...r, grantedTo: p(r.grantedTo) || [] }));
+  } else if (table === "revisions") {
+    rows = db.prepare("SELECT * FROM revisions ORDER BY projectId, revIndex LIMIT ? OFFSET ?").all(limit, offset).map(hydrateRev);
+  } else {
+    rows = db.prepare("SELECT * FROM drafts ORDER BY projectId LIMIT ? OFFSET ?").all(limit, offset).map(d => ({ ...d, data: p(d.data) }));
+  }
+  res.json({ rows, next: rows.length === limit ? offset + limit : null });
+});
+// Step 1: wipe + settings + users (superadmin only). Step 2: rows of each table in chunks.
+app.post("/api/backup/restore/start", superOnly, (req, res) => {
+  const { settings, users } = req.body || {};
+  db.transaction(() => restoreBegin(settings, users, req.user))();
+  bumpPriceListVersion();
+  res.json({ ok: true });
+});
+app.post("/api/backup/restore/rows", superOnly, (req, res) => {
+  const { table, rows } = req.body || {};
+  db.transaction(() => restoreRows(table, rows))();
+  if (table === "priceList") bumpPriceListVersion();
+  res.json({ ok: true, count: Array.isArray(rows) ? rows.length : 0 });
 });
 
 // ─── Error handler (always JSON, never a stack trace to the client) ───────────

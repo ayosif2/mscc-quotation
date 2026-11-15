@@ -1,0 +1,24 @@
+// Cloudflare Workers configuration for the MSCC Quotation System.
+// The website is the same build as the PC version (../dist); /api/* runs src/index.js.
+{
+  "name": "mscc-quotation",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "../dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mscc",
+      // Placeholder for local testing. Phase 3: `npx wrangler d1 create mscc --location eeur`
+      // prints the real id to paste here.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": { "enabled": true }
+}

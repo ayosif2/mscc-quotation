@@ -24,3 +24,8 @@ npm
 Thumbs.db
 desktop.ini
 *.log
+# Cloudflare Workers project — local state and exported data (contains user data!)
+worker/node_modules/
+worker/.wrangler/
+worker/data/
+worker/.dev.vars

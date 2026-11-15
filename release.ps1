@@ -29,6 +29,13 @@ New-Item -ItemType Directory -Force (Join-Path $dest "SRC"), (Join-Path $dest "p
 foreach ($f in $files) { if (Test-Path $f) { Copy-Item $f $dest } }
 Copy-Item "SRC\*.jsx" (Join-Path $dest "SRC")
 Copy-Item "public\templates\*" (Join-Path $dest "public\templates")
+# Cloudflare Workers version (code only — never node_modules, .wrangler or data, which hold user data)
+if (Test-Path "worker") {
+  $w = Join-Path $dest "worker"
+  New-Item -ItemType Directory -Force $w | Out-Null
+  foreach ($f in "package.json","package-lock.json","wrangler.jsonc","README.md") { if (Test-Path "worker\$f") { Copy-Item "worker\$f" $w } }
+  foreach ($d in "src","migrations","scripts") { if (Test-Path "worker\$d") { Copy-Item "worker\$d" $w -Recurse } }
+}
 
 # 3. changelog stub
 $cl = "CHANGELOG.md"
