@@ -19,5 +19,8 @@
       "migrations_dir": "migrations"
     }
   ],
+  // The public address (v2.0.0). Replaced the named tunnel, which pointed at the office PC.
+  "routes": [{ "pattern": "mscc.dpdns.org", "custom_domain": true }],
+  "workers_dev": true, // keeps https://mscc-quotation.mscc-quotation-worker.workers.dev as a second address
   "observability": { "enabled": true }
 }
