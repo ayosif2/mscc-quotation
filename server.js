@@ -14,7 +14,7 @@ const { MIN_PASSWORD, hashPassword, verifyPassword, isHashed, needsRehash, signT
 const app      = express();
 const PORT     = process.env.PORT || 3001;
 const DB_PATH  = process.env.MSCC_DB || path.join(__dirname, "mscc_data.db");
-const BUILD    = path.join(__dirname, "dist");
+const BUILD    = process.env.MSCC_DIST || path.join(__dirname, "dist"); // MSCC_DIST: test another build
 const TOKEN_TTL = 7 * 24 * 60 * 60 * 1000; // sessions last 7 days
 
 app.disable("x-powered-by");
@@ -801,34 +801,10 @@ app.delete("/api/projects/:id/draft", adminOnly, (req, res) => {
 });
 
 // ─── Backup ───────────────────────────────────────────────────────────────────
-app.get("/api/backup", adminOnly, (req, res) => {
-  const settings  = {};
-  for (const r of db.prepare("SELECT key,value FROM settings").all())
-    settings[r.key] = p(r.value);
-
-  const projects  = db.prepare("SELECT * FROM projects ORDER BY createdAt DESC").all()
-    .map(r => ({ ...r, grantedTo: p(r.grantedTo) || [] }));
-  const revisions = db.prepare("SELECT * FROM revisions ORDER BY revIndex ASC").all()
-    .map(hydrateRev);
-  const drafts    = db.prepare("SELECT * FROM drafts").all()
-    .map(d => ({ ...d, data: p(d.data) }));
-  const priceList = db.prepare("SELECT * FROM price_list ORDER BY sortOrder ASC").all()
-    .map(hydratePLItem);
-
-  const backup = {
-    exportedAt: now(),
-    settings,
-    users:      db.prepare("SELECT * FROM users").all().map(u => ({ ...u, active: !!u.active })),
-    priceList,
-    projects,
-    revisions,
-    drafts,
-  };
-
-  res.setHeader("Content-Disposition", `attachment; filename="mscc_backup_${now().slice(0,10)}.json"`);
-  res.setHeader("Content-Type", "application/json");
-  res.json(backup);
-});
+// The one-shot backup and restore (before v1.4.0) were removed in v2.0.0 — the app uses the chunked
+// routes below, the same as the Cloudflare Workers version.
+app.get("/api/backup", (req, res) => res.status(410).json({ ok: false, error: "use_paged_backup" }));
+app.post("/api/backup/restore", (req, res) => res.status(410).json({ ok: false, error: "use_paged_restore" }));
 
 // Restore helpers — used by the one-shot restore below and by the chunked restore (v1.4.0).
 function restoreBegin(settings, users, actor) {   // wipes everything, then settings + users
@@ -899,18 +875,6 @@ function restoreRows(table, rows) {               // one table's rows (INSERT OR
     const e = new Error("bad table"); e.status = 400; throw e;
   }
 }
-
-// One-shot restore (older clients). The app itself uses the chunked restore below since v1.4.0.
-app.post("/api/backup/restore", superOnly, (req, res) => {
-  const { settings, users, priceList, projects, revisions, drafts } = req.body || {};
-  db.transaction(() => {
-    restoreBegin(settings, users, req.user);
-    restoreRows("priceList", priceList); restoreRows("projects", projects);
-    restoreRows("revisions", revisions); restoreRows("drafts", drafts);
-  })();
-  bumpPriceListVersion(); // restored price list → browsers must reload it
-  res.json({ ok: true });
-});
 
 // ─── Chunked backup / restore (v1.4.0) ────────────────────────────────────────
 // The browser downloads the backup table by table in pages and builds the same .json file

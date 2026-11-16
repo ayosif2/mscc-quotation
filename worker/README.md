@@ -39,8 +39,11 @@ them a new password instead. On Cloudflare those users get "Your password needs 
 3. `npx wrangler d1 migrations apply DB --remote`
 4. Stop using the PC version (or tell everyone), then: `npm run db:export` and `npm run db:import:remote`
 5. `npm run build:site` and `npm run deploy`
-6. Cloudflare dashboard → Workers & Pages → **mscc-quotation** → Settings → Domains & Routes → add your domain
-   (e.g. `quote.yourdomain.com`). If the named tunnel uses that hostname, move the tunnel to another name first.
+6. Move **mscc.dpdns.org** from the named tunnel to the Worker:
+   - Zero Trust → Networks → Tunnels → your tunnel → Public hostnames: delete `mscc.dpdns.org`
+     (optionally add `pc.mscc.dpdns.org` → `http://localhost:3001` to keep the PC version reachable as the fallback).
+   - Workers & Pages → **mscc-quotation** → Settings → Domains & Routes → Add → Custom domain → `mscc.dpdns.org`.
+   - If Cloudflare says a DNS record already exists, delete the tunnel's CNAME for `mscc` under DNS → Records and add again.
 7. Sign in on the new address and check a few projects. Delete `data/`.
 
 Keep the PC version as the fallback: it still has the same data up to the switch-over moment.

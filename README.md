@@ -4,8 +4,10 @@ Internal web app for building priced quotations (fire alarm, security, AV and si
 from a shared price list, with revisions, drafts and PDF / CSV / Excel exports.
 
 - **Backend:** Node.js + Express + SQLite (`better-sqlite3`) — [`server.js`](server.js)
-- **Frontend:** React 18 + Vite — [`SRC/app.jsx`](SRC/app.jsx)
+- **Frontend:** React 18 + Vite — [`SRC/`](SRC/): `app.jsx` (entry), `lib/` (server calls, constants,
+  quotation maths), `exports/` (PDF and Excel), `ui/` (one file per tab, plus the project editor)
 - **Roles:** pre-sales (own / shared projects), admin, superadmin
+- **Online:** https://mscc.dpdns.org runs the Cloudflare Workers version (since v2.0.0); the PC version is the fallback
 
 ## Run
 

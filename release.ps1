@@ -22,12 +22,12 @@ $pkg = [regex]::Replace($pkg, '"version"\s*:\s*"[^"]*"', "`"version`": `"$Versio
 [IO.File]::WriteAllText((Resolve-Path $pkgPath), $pkg)
 
 # 2. snapshot
-$files = "server.js","auth-utils.js","reset-password.js","migrate.js","package.json","package-lock.json",
+$files = "server.js","auth-utils.js","reset-password.js","package.json","package-lock.json",
          "index.html","vite.config.js","start.bat","start-on-desktop2.ps1","INSTALL.txt","CHANGELOG.md","release.ps1",
          "README.md",".gitignore"
 New-Item -ItemType Directory -Force (Join-Path $dest "SRC"), (Join-Path $dest "public\templates") | Out-Null
 foreach ($f in $files) { if (Test-Path $f) { Copy-Item $f $dest } }
-Copy-Item "SRC\*.jsx" (Join-Path $dest "SRC")
+Copy-Item "SRC\*" (Join-Path $dest "SRC") -Recurse   # app.jsx, main.jsx, lib\, exports\, ui\ (v2.0.0)
 Copy-Item "public\templates\*" (Join-Path $dest "public\templates")
 # Cloudflare Workers version (code only — never node_modules, .wrangler or data, which hold user data)
 if (Test-Path "worker") {

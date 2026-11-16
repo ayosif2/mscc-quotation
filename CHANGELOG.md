@@ -4,6 +4,21 @@ Each released version's source code is kept in `versions\v<version>\`.
 To make a new version: `.\release.ps1 1.2.0` (in PowerShell, in the MSCC folder), then run `start.bat`.
 Numbering: PATCH 1.1.x = bug fix · MINOR 1.x.0 = new feature · MAJOR x.0.0 = data/format change.
 
+## v2.0.0 - 2026-11-16
+The app moves online: it runs on **Cloudflare Workers + D1** at **https://mscc.dpdns.org** (free plan), no longer
+depending on the office PC and the tunnel. The PC version stays as a fallback with the same code.
+- **Clear error messages**: when the server refuses something, the app now says why — e.g. *Password was not
+  changed. Only the superadmin can create or change admin accounts…* — instead of always saying
+  "Could not reach the server". That message now appears only when the server really can't be reached.
+- **Frontend split into modules** (no behaviour change): `SRC/app.jsx` (about 4,000 lines) is now
+  `app.jsx` + `lib/` (api, constants, quote maths) + `exports/` (PDF, Excel) + `ui/` (one file per tab and the editor).
+- **Removed old code**: the browser-only demo mode (no server), the one-shot backup / restore routes
+  (the app has used the paged ones since v1.4.0 — the old routes now answer "use the paged backup") and
+  `migrate.js` (one-time JSON → SQLite migration from before v1.0.0).
+- Kept on purpose: the PC server still accepts old-format (scrypt) passwords, so the fallback works for everyone.
+  On Cloudflare, accounts that never signed in on v1.4.0 need a new password from an admin.
+- PC server: `MSCC_DIST` environment variable to serve another build (for testing).
+
 ## v1.4.0 - 2026-11-15
 Phase 2 of the Cloudflare Workers plan: a Workers + D1 version of the server, tested locally on a copy of the
 real data. The PC version keeps running as before — see `worker/README.md` for the switch-over (phase 3).

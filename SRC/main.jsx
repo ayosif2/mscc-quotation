@@ -1,9 +1,9 @@
 // ════════════════════════════════════════════════════════════
-// FILE 4: src/main.jsx  (save inside the "src" folder)
+// Entry point: mounts the app (SRC/app.jsx).
 // ════════════════════════════════════════════════════════════
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App.jsx";
+import App from "./app.jsx";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
