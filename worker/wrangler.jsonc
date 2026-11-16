@@ -14,9 +14,8 @@
     {
       "binding": "DB",
       "database_name": "mscc",
-      // Placeholder for local testing. Phase 3: `npx wrangler d1 create mscc --location eeur`
-      // prints the real id to paste here.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      // Created on 2026-11-16 (region EEUR) for https://mscc.dpdns.org
+      "database_id": "35f37b81-2345-4713-9b47-26ceca734f79",
       "migrations_dir": "migrations"
     }
   ],
