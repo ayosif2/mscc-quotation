@@ -388,8 +388,9 @@ export function ProjectEditor({project,user,settings,priceList,onBack,takeover,o
 
   const flash=(t,tp="ok")=>{setMsg({t,tp});setTimeout(()=>setMsg({t:"",tp:""}),3000);};
 
-  // only brands present in current lines
-  const allBrands=[...new Set(lines.map(l=>l.brand).filter(Boolean))];
+  // only brands present in current lines — including the children of subsystems,
+  // whose brands are priced with these factors too
+  const allBrands=[...new Set(lines.flatMap(l=>[l.brand,...(l.type==="subsystem"?(l.children||[]).map(c=>c.brand):[])]).filter(Boolean))];
   const plBrands=[...new Set((priceList||[]).map(i=>i.brand).filter(Boolean))];
 
   const supplyUSD=expandForCalc(lines).reduce((s,l)=>s+calcUnitPrice(l,brandFactors,localFactor)*l.qty,0);
