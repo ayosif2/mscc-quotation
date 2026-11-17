@@ -4,6 +4,15 @@ Each released version's source code is kept in `versions\v<version>\`.
 To make a new version: `.\release.ps1 1.2.0` (in PowerShell, in the MSCC folder), then run `start.bat`.
 Numbering: PATCH 1.1.x = bug fix · MINOR 1.x.0 = new feature · MAJOR x.0.0 = data/format change.
 
+## v2.1.0 - 2026-11-17
+- **Search by brand** in the project editor's "+ From price list" search (for project lines and for items
+  inside a subsystem): a brand list next to the search box, A–Z with item counts. **All brands** (the default)
+  is the search exactly as before. Picking a brand lists that brand's items at once, and the text then
+  searches only within that brand (up to 50 results). A price-list subsystem counts for a brand if any item
+  in it — or its display brand — is that brand. The brand stays selected while the editor is open.
+- **Row number (#) editing**: Enter saves the number and moves to the next row's number, Shift+Enter to the
+  previous one — the same as Qty. Enter on the last row closes the box.
+
 ## v2.0.1 - 2026-11-17
 - **Brand factors for subsystem items**: a brand used only by items inside a subsystem now gets its own
   field in *Brand factors for this project* (before, only brands of top-level rows were listed, so those

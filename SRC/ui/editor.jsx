@@ -20,18 +20,35 @@ export function qtyEnter(e){
   if(next){next.focus();next.select();}
 }
 
-export function ItemSearchDropdown({priceList,onSelect,excludeSubsystems}){
+// Brand filter (v2.1.0): "" = all brands (the original search, unchanged). A brand narrows the list to
+// items of that brand — a subsystem counts if its display brand or any item inside it is that brand.
+// The brand can be held by the editor (brand / onBrand) so it survives the search box closing.
+const hasBrand=(i,b)=>(i.brand||"").trim()===b||(i.type==="subsystem"&&(i.children||[]).some(c=>(c.brand||"").trim()===b));
+export function ItemSearchDropdown({priceList,onSelect,excludeSubsystems,brand:brandProp,onBrand}){
   const [q,setQ]=useState(""),[open,setOpen]=useState(false),[hi,setHi]=useState(-1);
-  const ref=useRef(),listRef=useRef();
-  const pool=useMemo(()=>excludeSubsystems?(priceList||[]).filter(i=>i.type!=="subsystem"):(priceList||[]),[priceList,excludeSubsystems]);
+  const [brandOwn,setBrandOwn]=useState("");
+  const brand=brandProp??brandOwn,setBrand=onBrand||setBrandOwn;
+  const ref=useRef(),listRef=useRef(),inputRef=useRef();
+  const base=useMemo(()=>excludeSubsystems?(priceList||[]).filter(i=>i.type!=="subsystem"):(priceList||[]),[priceList,excludeSubsystems]);
+  const brandList=useMemo(()=>{const n={};base.forEach(i=>{const s=new Set([(i.brand||"").trim(),...(i.type==="subsystem"?(i.children||[]).map(c=>(c.brand||"").trim()):[])]);s.forEach(b=>{if(b)n[b]=(n[b]||0)+1;});});return Object.entries(n).sort((a,b)=>a[0].localeCompare(b[0],undefined,{sensitivity:"base"}));},[base]);
+  const pool=useMemo(()=>brand?base.filter(i=>hasBrand(i,brand)):base,[base,brand]);
   const matchingChild=(i,ql)=>i.type==="subsystem"?(i.children||[]).find(c=>(c.modelNo||"").toLowerCase().includes(ql)||(c.description||"").toLowerCase().includes(ql)):null;
-  const results=useMemo(()=>{if(!q.trim())return pool.slice(0,12);const ql=q.toLowerCase();return pool.filter(i=>(i.modelNo||"").toLowerCase().includes(ql)||(i.description||"").toLowerCase().includes(ql)||(i.brand||"").toLowerCase().includes(ql)||matchingChild(i,ql)).slice(0,20);},[q,pool]);
+  const results=useMemo(()=>{const max=brand?50:20;if(!q.trim())return pool.slice(0,brand?max:12);const ql=q.toLowerCase();return pool.filter(i=>(i.modelNo||"").toLowerCase().includes(ql)||(i.description||"").toLowerCase().includes(ql)||(i.brand||"").toLowerCase().includes(ql)||matchingChild(i,ql)).slice(0,max);},[q,pool,brand]);
   useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);},[]);
   useEffect(()=>{setHi(-1);},[q]);
   useEffect(()=>{if(hi>=0&&listRef.current){const el=listRef.current.children[hi];if(el)el.scrollIntoView({block:"nearest"});}},[hi]);
   const onKey=e=>{if(!open||!results.length)return;if(e.key==="ArrowDown"){e.preventDefault();setHi(h=>Math.min(h+1,results.length-1));}else if(e.key==="ArrowUp"){e.preventDefault();setHi(h=>Math.max(h-1,0));}else if(e.key==="Enter"&&hi>=0){e.preventDefault();onSelect(results[hi]);setQ("");setOpen(false);setHi(-1);}else if(e.key==="Escape")setOpen(false);};
   return(<div ref={ref} style={{position:"relative",flex:1,minWidth:260}}>
-    <input style={C.input} value={q} placeholder="Search model no or description…" onChange={e=>{setQ(e.target.value);setOpen(true);}} onFocus={()=>setOpen(true)} onKeyDown={onKey}/>
+    <div style={{display:"flex",gap:6}}>
+      <select style={{...C.input,width:"auto",maxWidth:190,flex:"0 0 auto",background:brand?"#eff6ff":undefined}} value={brand} title="Search within one brand"
+        onChange={e=>{setBrand(e.target.value);setOpen(true);inputRef.current?.focus();}}>
+        <option value="">All brands</option>
+        {brand&&!brandList.some(([b])=>b===brand)&&<option value={brand}>{brand} (0)</option>}
+        {brandList.map(([b,n])=><option key={b} value={b}>{b} ({n})</option>)}
+      </select>
+      <input ref={inputRef} style={{...C.input,flex:1}} value={q} placeholder={brand?`Search ${brand} items…`:"Search model no or description…"} onChange={e=>{setQ(e.target.value);setOpen(true);}} onFocus={()=>setOpen(true)} onKeyDown={onKey}/>
+    </div>
+    {open&&brand&&results.length===0&&<div style={{position:"absolute",top:"100%",left:0,right:0,background:"#fff",border:"1px solid #b0b0b0",borderRadius:"6px",padding:"8px 12px",fontSize:12,color:"#888",zIndex:200}}>No {brand} items match.</div>}
     {open&&results.length>0&&<div ref={listRef} style={{position:"absolute",top:"100%",left:0,right:0,background:"#fff",border:"1px solid #b0b0b0",borderRadius:"6px",boxShadow:"0 4px 16px rgba(0,0,0,0.15)",zIndex:200,maxHeight:260,overflowY:"auto"}}>
       {results.map((item,i)=>{
         const isSS=item.type==="subsystem";
@@ -73,7 +90,7 @@ export function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,cur
   onDragStart,onDragEnter,onDragEnd,onDragOver,ssChildDragItem,ssChildDragOver,dragOver,
   priceList,plBrands,fmtN,fmtR,C,ssLineUnitDisp,ssLineTot,calcUnitPrice,applyRounding,
   isSubEntry,isContStart,canMerge,canUnmerge,isLastInGroup,groupSize,mergeWithAbove,unmerge,
-  editingRowNum,setEditingRowNum,setRowNumOverride,saveSubsystemToPriceList,selectedIds,toggleSelect}){
+  editingRowNum,setEditingRowNum,setRowNumOverride,saveSubsystemToPriceList,selectedIds,toggleSelect,searchBrand,setSearchBrand,nextRowNumId}){
   const [ssAddMode,setSSAddMode]=useState(null);
   const [ssCustomForm,setSSCF]=useState({description:"",modelNo:"",brand:"",glp:"",local:"",notes:""});
   const [editingChildId,setEditingChildId]=useState(null);
@@ -98,8 +115,8 @@ export function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,cur
           ? <div style={{marginTop:2}} onClick={e=>e.stopPropagation()}>
               <input autoFocus style={{...C.input,width:42,padding:"2px 4px",textAlign:"center",fontSize:12}}
                 defaultValue={line.rowNumOverride||line.rowNumAuto||line.rowNum}
-                onBlur={e=>{setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(null);}}
-                onKeyDown={e=>{if(e.key==="Enter"){setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(null);}if(e.key==="Escape")setEditingRowNum(null);}}
+                onBlur={e=>{setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(cur=>cur===line.id?null:cur);}}
+                onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(nextRowNumId(line.id,e.shiftKey?-1:1));}if(e.key==="Escape")setEditingRowNum(null);}}
               />
               {line.rowNumOverride&&<div style={{fontSize:9,color:"#c0392b",cursor:"pointer",marginTop:1}} onMouseDown={e=>{e.preventDefault();resetRowNum(line.id);}}>↺ auto</div>}
             </div>
@@ -231,7 +248,7 @@ export function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,cur
           <button style={{...C.btnS,fontSize:11,padding:"2px 10px"}} onClick={()=>setSSAddMode("custom")}>+ Custom item</button>
         </div>}
         {ssAddMode==="catalog"&&<div style={{display:"flex",gap:7,alignItems:"flex-end"}}>
-          <ItemSearchDropdown priceList={priceList} excludeSubsystems onSelect={item=>{addChildFromCatalog(line.id,item);setSSAddMode(null);}}/>
+          <ItemSearchDropdown priceList={priceList} excludeSubsystems brand={searchBrand} onBrand={setSearchBrand} onSelect={item=>{addChildFromCatalog(line.id,item);setSSAddMode(null);}}/>
           <button style={C.btnS} onClick={()=>setSSAddMode(null)}>Cancel</button>
         </div>}
         {ssAddMode==="custom"&&<div>
@@ -283,6 +300,7 @@ export function ProjectEditor({project,user,settings,priceList,onBack,takeover,o
   const [gtAfterDiscountEnabled,setGtAfterDiscountEnabled]=useState(lr.gtAfterDiscountEnabled??false);
   const [roundUp,setRoundUp]=useState(lr.roundUp??false);
   const [addMode,setAddMode]=useState(null);
+  const [searchBrand,setSearchBrand]=useState(""); // brand filter of the item search, kept while the editor is open (v2.1.0)
   const [customForm,setCF]=useState({description:"",modelNo:"",brand:"",glp:"",local:"",notes:""});
   const [warnLocal,setWarnLocal]=useState(false);
   const [msg,setMsg]=useState({t:"",tp:""});
@@ -742,6 +760,9 @@ export function ProjectEditor({project,user,settings,priceList,onBack,takeover,o
   // "↺ auto" fires on mouse-down (before the box loses focus) and sets rowNumResetRef,
   // so the box's own blur can't save the old manual number back right after the reset.
   const rowNumResetRef=useRef(null);
+  // Enter / Shift+Enter in a row-number box moves to the next / previous numbered row (v2.1.0) — like qty.
+  // Numbered rows = not section headers and not the 2nd+ rows of a merged group (those show no number box).
+  const nextRowNumId=(id,dir)=>{const ed=lines.filter(l=>l.type!=="section"&&l.rowNum!=="");const i=ed.findIndex(l=>l.id===id);return (i>=0&&ed[i+dir])?ed[i+dir].id:null;};
   const setRowNumOverride=(id,val)=>{
     if(rowNumResetRef.current===id){rowNumResetRef.current=null;return;}
     setLines(l=>assignRowNums(l.map(x=>{if(x.id!==id)return x;const v=String(val??"").trim();return{...x,rowNumOverride:v&&v!==String(x.rowNumAuto)?v:null};})));
@@ -943,7 +964,7 @@ export function ProjectEditor({project,user,settings,priceList,onBack,takeover,o
               isSubEntry={ssIsSubEntry} isContStart={ssIsContStart} canMerge={ssCanMerge} canUnmerge={ssCanUnmerge} isLastInGroup={ssIsLastInGroup} groupSize={ssGroupSize}
               mergeWithAbove={mergeWithAbove} unmerge={unmerge}
               editingRowNum={editingRowNum} setEditingRowNum={setEditingRowNum} setRowNumOverride={setRowNumOverride}
-              saveSubsystemToPriceList={saveSubsystemToPriceList} selectedIds={selectedIds} toggleSelect={toggleSelect}/>);
+              saveSubsystemToPriceList={saveSubsystemToPriceList} selectedIds={selectedIds} toggleSelect={toggleSelect} searchBrand={searchBrand} setSearchBrand={setSearchBrand} nextRowNumId={nextRowNumId}/>);
           }
           if(line.type==="section") return(
             <tr key={line.id}
@@ -1034,8 +1055,8 @@ export function ProjectEditor({project,user,settings,priceList,onBack,takeover,o
               ? <div style={{marginTop:2}} onClick={e=>e.stopPropagation()}>
                   <input autoFocus style={{...C.input,width:42,padding:"2px 4px",textAlign:"center",fontSize:12}}
                     defaultValue={line.rowNumOverride||line.rowNumAuto||line.rowNum}
-                    onBlur={e=>{setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(null);}}
-                    onKeyDown={e=>{if(e.key==="Enter"){setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(null);}if(e.key==="Escape")setEditingRowNum(null);}}
+                    onBlur={e=>{setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(cur=>cur===line.id?null:cur);}}
+                    onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(nextRowNumId(line.id,e.shiftKey?-1:1));}if(e.key==="Escape")setEditingRowNum(null);}}
                   />
                   {line.rowNumOverride&&<div style={{fontSize:9,color:"#c0392b",cursor:"pointer",marginTop:1}} onMouseDown={e=>{e.preventDefault();resetRowNum(line.id);}}>↺ auto</div>}
                 </div>
@@ -1117,7 +1138,7 @@ export function ProjectEditor({project,user,settings,priceList,onBack,takeover,o
       </div>}
 
       {addMode===null&&<div style={{display:"flex",gap:8,flexWrap:"wrap"}}><button style={C.btnS} onClick={()=>setAddMode("catalog")}>+ From price list</button><button style={C.btnS} onClick={()=>setAddMode("custom")}>+ Custom item</button><button style={{...C.btnS,borderColor:"#c0392b",color:"#c0392b"}} onClick={addSection}>+ Add section</button><button style={{...C.btnS,borderColor:"#7c3aed",color:"#7c3aed"}} onClick={addSubsystem}>⊞ Add subsystem</button><button style={{...C.btnS,borderColor:"#16a34a",color:"#16a34a"}} disabled={solNavLoading} onClick={()=>solNavFileRef.current?.click()}>{solNavLoading?"Importing…":"📥 From Solution Navigator"}</button><input ref={solNavFileRef} type="file" accept=".xlsx,.xls" style={{display:"none"}} onChange={onSolNavFile}/></div>}
-      {addMode==="catalog"&&<div style={{...C.row,alignItems:"flex-end",marginTop:6}}><ItemSearchDropdown priceList={priceList} onSelect={addFromCatalog}/><button style={C.btnS} onClick={()=>setAddMode(null)}>Cancel</button></div>}
+      {addMode==="catalog"&&<div style={{...C.row,alignItems:"flex-end",marginTop:6}}><ItemSearchDropdown priceList={priceList} brand={searchBrand} onBrand={setSearchBrand} onSelect={addFromCatalog}/><button style={C.btnS} onClick={()=>setAddMode(null)}>Cancel</button></div>}
       {addMode==="custom"&&<div style={{marginTop:8}}>
         <div style={C.row}>
           <div style={{flex:2,minWidth:130}}><label style={C.label}>Description</label><textarea style={{...C.input,minHeight:60,resize:"vertical",lineHeight:1.5}} value={customForm.description} onChange={e=>setCF(f=>({...f,description:e.target.value}))}/></div>
