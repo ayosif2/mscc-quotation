@@ -113,7 +113,7 @@ export function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,cur
             </div>
           : editingRowNum===line.id
           ? <div style={{marginTop:2}} onClick={e=>e.stopPropagation()}>
-              <input autoFocus style={{...C.input,width:42,padding:"2px 4px",textAlign:"center",fontSize:12}}
+              <input autoFocus onFocus={qtyFocus} style={{...C.input,width:42,padding:"2px 4px",textAlign:"center",fontSize:12}}
                 defaultValue={line.rowNumOverride||line.rowNumAuto||line.rowNum}
                 onBlur={e=>{setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(cur=>cur===line.id?null:cur);}}
                 onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(nextRowNumId(line.id,e.shiftKey?-1:1));}if(e.key==="Escape")setEditingRowNum(null);}}
@@ -1053,7 +1053,7 @@ export function ProjectEditor({project,user,settings,priceList,onBack,takeover,o
                 </div>
               : editingRowNum===line.id
               ? <div style={{marginTop:2}} onClick={e=>e.stopPropagation()}>
-                  <input autoFocus style={{...C.input,width:42,padding:"2px 4px",textAlign:"center",fontSize:12}}
+                  <input autoFocus onFocus={qtyFocus} style={{...C.input,width:42,padding:"2px 4px",textAlign:"center",fontSize:12}}
                     defaultValue={line.rowNumOverride||line.rowNumAuto||line.rowNum}
                     onBlur={e=>{setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(cur=>cur===line.id?null:cur);}}
                     onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();setRowNumOverride(line.id,e.target.value.trim());setEditingRowNum(nextRowNumId(line.id,e.shiftKey?-1:1));}if(e.key==="Escape")setEditingRowNum(null);}}
