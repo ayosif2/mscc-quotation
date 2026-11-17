@@ -4,6 +4,12 @@ Each released version's source code is kept in `versions\v<version>\`.
 To make a new version: `.\release.ps1 1.2.0` (in PowerShell, in the MSCC folder), then run `start.bat`.
 Numbering: PATCH 1.1.x = bug fix · MINOR 1.x.0 = new feature · MAJOR x.0.0 = data/format change.
 
+## v2.0.1 - 2026-11-17
+- **Brand factors for subsystem items**: a brand used only by items inside a subsystem now gets its own
+  field in *Brand factors for this project* (before, only brands of top-level rows were listed, so those
+  items could not have their brand factor changed, and they did not get the default factor from Settings).
+  Note: brand factors multiply the GLP price only; items priced with a Local price use the Local factor.
+
 ## v2.0.0 - 2026-11-16
 The app moves online: it runs on **Cloudflare Workers + D1** at **https://mscc.dpdns.org** (free plan), no longer
 depending on the office PC and the tunnel. The PC version stays as a fallback with the same code.
