@@ -194,7 +194,7 @@ export function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,cur
         }}
         style={{background:child.optional?"#fffbf0":child.customFactor?"#eff6ff":"#faf5ff",borderLeft:"4px solid #c4b5fd"}}>
         {editingChildId===child.id?(
-          <td colSpan={11} style={{padding:"10px 12px",background:"#fffde7",border:"2px solid #f59e0b"}}>
+          <td colSpan={13} style={{padding:"10px 12px",background:"#fffde7",border:"2px solid #f59e0b"}}>
             <div style={{display:"flex",gap:8,marginBottom:8,flexWrap:"wrap"}}>
               <div style={{flex:2,minWidth:130}}><label style={C.label}>Description</label><textarea style={{...C.input,minHeight:55,resize:"vertical",lineHeight:1.5}} value={child.description} onChange={e=>updChild(line.id,child.id,"description",e.target.value)}/></div>
               <div style={C.f1}><label style={C.label}>Model No</label><textarea style={{...C.input,minHeight:55,resize:"vertical",lineHeight:1.5}} value={child.modelNo||""} onChange={e=>updChild(line.id,child.id,"modelNo",e.target.value)}/></div>
@@ -211,7 +211,9 @@ export function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,cur
             </div>
           </td>
         ):(<>
+        <td style={C.td}></td>
         <td style={{...C.td,textAlign:"center",color:"#aaa",fontSize:12,paddingLeft:12}}>└{ci+1}</td>
+        <td style={C.td}></td>
         <td style={{...C.td,whiteSpace:"pre-wrap"}}><code style={{fontSize:11}}>{child.modelNo||"—"}</code></td>
         <td style={C.td}>{child.brand||"—"}</td>
         <td style={{...C.td,whiteSpace:"pre-wrap"}}>{child.description||"—"}</td>
@@ -242,7 +244,7 @@ export function SubsystemRow({line,idx,brandFactors,localFactor,rate,roundUp,cur
     ))}
     {/* Add child buttons — auto-hidden while merged unless manually expanded */}
     {(line.mergeGroup?line.forceShowChildren:!line.collapsed)&&<tr key={line.id+"-add"}>
-      <td colSpan={11} style={{padding:"6px 10px 8px 28px",background:"#f9f5ff",borderLeft:"4px solid #c4b5fd"}}>
+      <td colSpan={13} style={{padding:"6px 10px 8px 28px",background:"#f9f5ff",borderLeft:"4px solid #c4b5fd"}}>
         {ssAddMode===null&&<div style={{display:"flex",gap:7}}>
           <button style={{...C.btnS,fontSize:11,padding:"2px 10px"}} onClick={()=>setSSAddMode("catalog")}>+ From price list</button>
           <button style={{...C.btnS,fontSize:11,padding:"2px 10px"}} onClick={()=>setSSAddMode("custom")}>+ Custom item</button>
@@ -977,7 +979,7 @@ export function ProjectEditor({project,user,settings,priceList,onBack,takeover,o
               <td style={{padding:"5px 8px",background:"#c0392b",textAlign:"center",borderBottom:"2px solid #a93226"}}>
                 <input type="checkbox" checked={selectedIds.has(line.id)} onChange={()=>toggleSelect(line.id)}/>
               </td>
-              <td colSpan={10} style={{padding:"5px 8px",background:"#c0392b",borderBottom:"2px solid #a93226"}}>
+              <td colSpan={12} style={{padding:"5px 8px",background:"#c0392b",borderBottom:"2px solid #a93226"}}>
                 <div style={{display:"flex",alignItems:"center",gap:8}}>
                   <span style={{color:"rgba(255,255,255,0.6)",fontSize:16,userSelect:"none"}}>⠿</span>
                   <input

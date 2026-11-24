@@ -4,6 +4,12 @@ Each released version's source code is kept in `versions\v<version>\`.
 To make a new version: `.\release.ps1 1.2.0` (in PowerShell, in the MSCC folder), then run `start.bat`.
 Numbering: PATCH 1.1.x = bug fix · MINOR 1.x.0 = new feature · MAJOR x.0.0 = data/format change.
 
+## v2.1.3 - 2026-11-24
+- Fixed: in the project editor, **▶ Show** on a subsystem put its items two columns to the left (11 cells in a
+  13-column table), so the columns resized, the subsystem row changed shape and the right-hand columns could
+  be pushed out of view. Items now line up under Model, Brand, Description… and the table keeps its width.
+  The "+ From price list" row, the item edit box and section bars now span the full table width too.
+
 ## v2.1.2 - 2026-11-24
 - **Quotation with P/N** export now has the same **Select template** list as the normal Quotation (it always
   used the default template before). The internal-use warning stays.
