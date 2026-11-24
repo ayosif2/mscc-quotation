@@ -4,6 +4,10 @@ Each released version's source code is kept in `versions\v<version>\`.
 To make a new version: `.\release.ps1 1.2.0` (in PowerShell, in the MSCC folder), then run `start.bat`.
 Numbering: PATCH 1.1.x = bug fix · MINOR 1.x.0 = new feature · MAJOR x.0.0 = data/format change.
 
+## v2.1.2 - 2026-11-24
+- **Quotation with P/N** export now has the same **Select template** list as the normal Quotation (it always
+  used the default template before). The internal-use warning stays.
+
 ## v2.1.1 - 2026-11-17
 - **Row number (#) box selects its text** when it opens (also after Enter moves to the next row), so typing
   replaces the number straight away.

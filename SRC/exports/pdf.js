@@ -671,7 +671,7 @@ export function exportDetailedCSV(project,rev){
 export function generatePartNumPDF(project, rev, settings, tplId) {
   rev={...(rev.data||{}),...rev};
   const curr=rev.currency||"USD",rnd=rev.roundUp,rate=rev.conversionRate||1;
-  // no template picker for this export → use the default template (previously always the first one)
+  // template chosen in the export dialog (v2.1.2); falls back to the default template
   const tpl=settings.templates.find(t=>t.id===tplId)||settings.templates.find(t=>t.id===settings.defaultTemplateId)||settings.templates[0];
   const co=settings.company;
   const lUD=line=>applyRounding(calcUnitPrice(line,rev.brandFactors,rev.localFactor),rnd,rate);
